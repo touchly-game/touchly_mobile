@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
+import 'package:touchly/features/onboarding/presentation/pages/demo_theme_memory.dart';
 import 'package:touchly/features/onboarding/presentation/pages/home_page.dart';
 import 'package:touchly/features/onboarding/presentation/pages/login_page.dart';
 
@@ -191,26 +192,7 @@ class _RegisterPageState extends State<RegisterPage>
           .eq('code', activationCode);
 
       // ── Récupère l'ID du thème démo (Pokémon) ─────────────────────
-      String? demoThemeId;
-      try {
-        final themes = await supabase
-            .from('themes')
-            .select('id, name')
-            .eq('is_active', true) as List;
-
-        // Cherche "pokémon" en insensible à la casse
-        for (final t in themes) {
-          if ((t['name'] as String).toLowerCase().contains('pok')) {
-            demoThemeId = t['id'] as String;
-            break;
-          }
-        }
-        // Fallback : premier thème actif si Pokémon pas trouvé
-        demoThemeId ??= themes.isNotEmpty ? themes.first['id'] as String : null;
-      } catch (_) {
-        // Si ça échoue, on navigue quand même sans demoThemeId
-      }
-      // ──────────────────────────────────────────────────────────────
+      final demoThemeId = await DemoThemeMemory.read();
 
       if (!mounted) return;
       Navigator.pushReplacement(

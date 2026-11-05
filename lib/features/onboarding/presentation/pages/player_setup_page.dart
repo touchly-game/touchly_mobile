@@ -1,11 +1,21 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:touchly/features/game/presentation/controllers/game_session_controller.dart';
+import 'package:touchly/features/onboarding/presentation/pages/home_page.dart';
 import 'package:touchly/features/onboarding/presentation/pages/touchly_colors.dart';
+import 'package:touchly/features/onboarding/presentation/pages/victory_page.dart';
+
+import 'end_of_round_sheet.dart';
 
 class PlayerSetupPage extends StatefulWidget {
   final void Function(GameSessionController controller) onReady;
-  const PlayerSetupPage({super.key, required this.onReady});
+  final int catchUpRounds; // ← NOUVEAU
+
+  const PlayerSetupPage({
+    super.key,
+    required this.onReady,
+    this.catchUpRounds = 0, // ← NOUVEAU
+  });
 
   @override
   State<PlayerSetupPage> createState() => _PlayerSetupPageState();
@@ -19,6 +29,8 @@ class _PlayerSetupPageState extends State<PlayerSetupPage> {
     TextEditingController(),
     TextEditingController(),
   ];
+
+  bool _startingCatchUp = false; // ← NOUVEAU : bloque le bouton pendant la boucle
 
   @override
   void dispose() {
@@ -44,14 +56,66 @@ class _PlayerSetupPageState extends State<PlayerSetupPage> {
   }
 
   bool get _canStart =>
+      !_startingCatchUp &&
       _controllers.length >= _minPlayers &&
           _controllers.every((c) => c.text.trim().isNotEmpty);
 
-  void _start() {
+  Future<void> _start() async {
     if (!_canStart) return;
     HapticFeedback.mediumImpact();
     final names = _controllers.map((c) => c.text.trim()).toList();
     final controller = GameSessionController()..setPlayers(names);
+
+    // Pas de rattrapage → partie normale, comportement inchangé.
+    if (widget.catchUpRounds <= 0) {
+      widget.onReady(controller);
+      return;
+    }
+
+    // ── Rattrapage des manches jouées en démo ──────────────────
+    setState(() => _startingCatchUp = true);
+
+    for (var i = 1; i <= widget.catchUpRounds; i++) {
+      if (!mounted) return;
+
+      final outcome = await showEndOfRoundSheet(
+        context,
+        controller: controller,
+        roundLabel: 'Manche $i/${widget.catchUpRounds} (rattrapage démo)',
+      );
+
+      // L'utilisateur a fermé le popup sans valider (ne devrait pas
+      // arriver puisqu'il est non-dismissible, mais on sécurise).
+      if (outcome == null || !mounted) {
+        setState(() => _startingCatchUp = false);
+        return;
+      }
+
+      controller.applyRoundResult(outcome);
+
+      // Cas limite : un joueur atteint 5 points dès le rattrapage.
+      if (controller.hasWinner) {
+        Navigator.of(context).pushReplacement(
+          MaterialPageRoute(
+            builder: (_) => VictoryPage(
+              winner: controller.winner!,
+              onReplay: () => Navigator.of(context).pushAndRemoveUntil(
+                MaterialPageRoute(builder: (_) => const GameHomePage()),
+                    (_) => false,
+              ),
+              onHome: () => Navigator.of(context).pushAndRemoveUntil(
+                MaterialPageRoute(builder: (_) => const GameHomePage()),
+                    (_) => false,
+              ),
+            ),
+          ),
+        );
+        return;
+      }
+    }
+
+    if (!mounted) return;
+    setState(() => _startingCatchUp = false);
     widget.onReady(controller);
   }
 
@@ -80,13 +144,15 @@ class _PlayerSetupPageState extends State<PlayerSetupPage> {
                   ],
                 ),
               ),
-              const Padding(
-                padding: EdgeInsets.symmetric(horizontal: 24),
+              Padding(
+                padding: const EdgeInsets.symmetric(horizontal: 24),
                 child: Align(
                   alignment: Alignment.centerLeft,
                   child: Text(
-                    'Ajoute entre 2 et 8 joueurs pour commencer',
-                    style: TextStyle(color: TouchlyColors.textSub, fontSize: 13),
+                    widget.catchUpRounds > 0
+                        ? 'Ajoute les joueurs, puis on rattrape les ${widget.catchUpRounds} manches jouées en démo'
+                        : 'Ajoute entre 2 et 8 joueurs pour commencer',
+                    style: const TextStyle(color: TouchlyColors.textSub, fontSize: 13),
                   ),
                 ),
               ),
@@ -162,7 +228,16 @@ class _PlayerSetupPageState extends State<PlayerSetupPage> {
                           : null,
                     ),
                     child: Center(
-                      child: Text('🚀  Lancer la partie',
+                      child: _startingCatchUp
+                          ? const SizedBox(
+                        width: 22, height: 22,
+                        child: CircularProgressIndicator(
+                            strokeWidth: 2.5, color: TouchlyColors.yellow),
+                      )
+                          : Text(
+                          widget.catchUpRounds > 0
+                              ? '🔁  Rattraper les manches démo'
+                              : '🚀  Lancer la partie',
                           style: TextStyle(
                               color: _canStart
                                   ? TouchlyColors.navy

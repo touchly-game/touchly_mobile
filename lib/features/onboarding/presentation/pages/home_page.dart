@@ -1,9 +1,13 @@
 import 'package:flutter/material.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
-import 'package:touchly/features/game/presentation/controllers/game_session_controller.dart';
+import 'package:touchly/features/onboarding/presentation/pages/demo_theme_memory.dart';
+import 'package:touchly/features/onboarding/presentation/pages/game_mode_page.dart';
 import 'package:touchly/features/onboarding/presentation/pages/game_play_page.dart';
 import 'package:touchly/features/onboarding/presentation/pages/login_page.dart';
 import 'package:touchly/features/onboarding/presentation/pages/player_setup_page.dart';
+import 'package:touchly/features/onboarding/presentation/pages/points_service.dart';
+import 'package:touchly/features/onboarding/presentation/pages/progression_card.dart';
+import 'package:touchly/features/onboarding/presentation/pages/review_request_dialog.dart';
 import 'package:touchly/features/onboarding/presentation/pages/theme_store_page.dart';
 import 'package:touchly/core/models/app_theme.dart';
 
@@ -24,7 +28,10 @@ const _textSub       = Color(0xFFB3C8F0);
 //  GameHomePage
 // ─────────────────────────────────────────────
 class GameHomePage extends StatefulWidget {
-  /// ID du thème joué pendant la démo — affiché en priorité dans le hero
+  /// ID du thème joué pendant la démo — affiché en priorité dans le hero.
+  /// Optionnel : si non fourni (cas le plus courant après un parcours
+  /// d'inscription classique), on retombe automatiquement sur la valeur
+  /// mémorisée localement via DemoThemeMemory.
   final String? demoThemeId;
 
   const GameHomePage({super.key, this.demoThemeId});
@@ -35,20 +42,22 @@ class GameHomePage extends StatefulWidget {
 
 class _GameHomePageState extends State<GameHomePage> {
   List<AppTheme> _userThemes    = [];
-  AppTheme?      _demoTheme;      // thème joué en démo
+  AppTheme?      _demoTheme;
   bool           _loading        = true;
   String         _firstName      = '';
   String         _lastName       = '';
   int            _totalQuestions = 0;
+  UserPoints _points = UserPoints.zero;
+
 
   @override
   void initState() {
     super.initState();
     _loadUserProfile();
     _loadUserThemes();
-    if (widget.demoThemeId != null) {
-      _loadDemoTheme(widget.demoThemeId!);
-    }
+    _loadPoints();
+    _resolveDemoTheme();
+    ReviewRequestService.maybeShow(context);
   }
 
   // ── Profil ────────────────────────────────────
@@ -63,7 +72,7 @@ class _GameHomePageState extends State<GameHomePage> {
           .from('app_users')
           .select('first_name, last_name')
           .eq('id', user.id)
-          .maybeSingle(); // ← ne plante plus si 0 ligne trouvée
+          .maybeSingle();
 
       debugPrint('🔍 Profil chargé: $data');
 
@@ -73,7 +82,6 @@ class _GameHomePageState extends State<GameHomePage> {
             _firstName = (data['first_name'] as String?)?.trim() ?? '';
             _lastName  = (data['last_name']  as String?)?.trim() ?? '';
           } else {
-            // Fallback si aucune ligne app_users pour cet utilisateur
             _firstName = user.email?.split('@').first ?? '';
             _lastName  = '';
           }
@@ -85,9 +93,14 @@ class _GameHomePageState extends State<GameHomePage> {
     }
   }
 
+  Future<void> _loadPoints() async {
+    final points = await PointsService.fetchCurrentUserPoints();
+    if (mounted) setState(() => _points = points);
+  }
+
+
   Future<void> _loadUserThemes() async {
     setState(() => _loading = true);
-    debugPrint('🔍 demoThemeId reçu: ${widget.demoThemeId}');
     try {
       final user = Supabase.instance.client.auth.currentUser;
       if (user == null) return;
@@ -119,21 +132,35 @@ class _GameHomePageState extends State<GameHomePage> {
     }
   }
 
+  // ── Résolution du thème démo ───────────────────
+  /// Priorité 1 : le paramètre `demoThemeId` transmis directement.
+  /// Priorité 2 : la valeur mémorisée localement pendant la démo,
+  ///              qui survit peu importe le nombre d'écrans traversés
+  ///              entre la démo et l'arrivée ici (inscription, activation...).
+  Future<void> _resolveDemoTheme() async {
+    debugPrint('🔍 demoThemeId reçu en paramètre: ${widget.demoThemeId}');
+
+    String? themeId = widget.demoThemeId;
+    themeId ??= await DemoThemeMemory.read();
+
+    debugPrint('🔍 demoThemeId résolu (paramètre ou mémoire locale): $themeId');
+
+    if (themeId != null) {
+      await _loadDemoTheme(themeId);
+    }
+  }
+
   Future<void> _loadDemoTheme(String themeId) async {
     try {
-      debugPrint('🔍 Chargement demoTheme pour id: $themeId');
       final data = await Supabase.instance.client
           .from('themes')
           .select('*')
           .eq('id', themeId)
           .maybeSingle();
-      debugPrint('🔍 demoTheme data reçu: $data');
       if (data != null && mounted) {
         setState(() => _demoTheme =
             AppTheme.fromMap(data as Map<String, dynamic>));
         debugPrint('✅ _demoTheme set: ${_demoTheme?.name}');
-      } else {
-        debugPrint('❌ data null ou widget démonté');
       }
     } catch (e) {
       debugPrint('❌ Error loading demo theme: $e');
@@ -142,6 +169,7 @@ class _GameHomePageState extends State<GameHomePage> {
 
   // ── Navigation ────────────────────────────────
   Future<void> _logout() async {
+    ReviewRequestService.resetSession();
     await Supabase.instance.client.auth.signOut();
     if (mounted) {
       Navigator.of(context).pushAndRemoveUntil(
@@ -152,10 +180,15 @@ class _GameHomePageState extends State<GameHomePage> {
   }
 
   void _startGame(AppTheme theme, {int startQuestionIndex = 0}) {
+    if (_demoTheme != null && theme.id == _demoTheme!.id) {
+      DemoThemeMemory.clear();
+    }
+
     Navigator.push(
       context,
       MaterialPageRoute(
         builder: (_) => PlayerSetupPage(
+          catchUpRounds: startQuestionIndex,
           onReady: (session) {
             Navigator.pushReplacement(
               context,
@@ -163,7 +196,7 @@ class _GameHomePageState extends State<GameHomePage> {
                 builder: (_) => GamePlayPage(
                   theme: theme,
                   startQuestionIndex: startQuestionIndex,
-                  session: session, // ← le controller rempli avec les joueurs
+                  session: session,
                 ),
               ),
             );
@@ -182,7 +215,7 @@ class _GameHomePageState extends State<GameHomePage> {
     );
   }
 
-  void _openShop() {
+  void _openGiftPhysicalGame() {
     ScaffoldMessenger.of(context).showSnackBar(
       const SnackBar(content: Text('Boutique physique bientôt disponible !')),
     );
@@ -262,6 +295,10 @@ class _GameHomePageState extends State<GameHomePage> {
                   ),
                   const SizedBox(height: 28),
 
+                  const SizedBox(height: 16),
+                  ProgressionCard(points: _points),
+                  const SizedBox(height: 28),
+
                   // ── Mes thèmes ─────────────────────────
                   const _SectionLabel(text: 'Mes thèmes'),
                   const SizedBox(height: 12),
@@ -297,14 +334,19 @@ class _GameHomePageState extends State<GameHomePage> {
                     const SizedBox(width: 12),
                     Expanded(
                       child: _NavCard(
-                        label:    'Boutique',
-                        sublabel: 'Jeu physique',
-                        emoji:    '🛒',
-                        color:    const Color(0xFFF97316),
-                        onTap:    _openShop,
+                        label:    'Modes de jeu',
+                        sublabel: 'Découvre les règles',
+                        emoji:    '🎲',
+                        color:    _yellow,
+                        onTap:    () => Navigator.push(
+                          context,
+                          MaterialPageRoute(builder: (_) => const GameModesPage()),
+                        ),
                       ),
                     ),
                   ]),
+                  const SizedBox(height: 28),
+                  _GiftPhysicalGameLink(onTap: _openGiftPhysicalGame),
                 ],
               ),
             ),
@@ -353,7 +395,6 @@ class _HeroCard extends StatelessWidget {
         borderRadius: BorderRadius.circular(22),
         child: Column(children: [
 
-          // Priorité : bannière démo > dernier thème > vide
           if (demoTheme != null && onResumeDemoTheme != null)
             _DemoResumeBanner(
               theme:    demoTheme!,
@@ -368,7 +409,6 @@ class _HeroCard extends StatelessWidget {
               onResumeDemoTheme: onResumeDemoTheme,
             ),
 
-          // Stats
           Container(
             decoration: BoxDecoration(
               border: Border(
@@ -395,7 +435,7 @@ class _HeroCard extends StatelessWidget {
 }
 
 // ─────────────────────────────────────────────
-//  _DemoResumeBanner  ← NOUVEAU
+//  _DemoResumeBanner
 // ─────────────────────────────────────────────
 class _DemoResumeBanner extends StatelessWidget {
   final AppTheme     theme;
@@ -420,7 +460,6 @@ class _DemoResumeBanner extends StatelessWidget {
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
 
-          // Badge
           Container(
             padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
             decoration: BoxDecoration(
@@ -442,7 +481,6 @@ class _DemoResumeBanner extends StatelessWidget {
           ),
           const SizedBox(height: 14),
 
-          // Thème + texte
           Row(children: [
             Container(
               width: 54, height: 54,
@@ -487,7 +525,6 @@ class _DemoResumeBanner extends StatelessWidget {
 
           const SizedBox(height: 14),
 
-          // Barre de progression
           Row(children: [
             const Text(
               '3 questions faites en démo',
@@ -514,7 +551,6 @@ class _DemoResumeBanner extends StatelessWidget {
 
           const SizedBox(height: 14),
 
-          // Bouton reprendre
           GestureDetector(
             onTap: onResume,
             child: Container(
@@ -541,6 +577,49 @@ class _DemoResumeBanner extends StatelessWidget {
             ),
           ),
         ],
+      ),
+    );
+  }
+}
+
+// ── Lien "Offrir le jeu physique" ──────────────
+class _GiftPhysicalGameLink extends StatelessWidget {
+  final VoidCallback onTap;
+  const _GiftPhysicalGameLink({required this.onTap});
+
+  @override
+  Widget build(BuildContext context) {
+    return Center(
+      child: GestureDetector(
+        onTap: onTap,
+        child: Container(
+          padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 12),
+          decoration: BoxDecoration(
+            color: Colors.white.withOpacity(0.04),
+            borderRadius: BorderRadius.circular(14),
+            border: Border.all(color: Colors.white.withOpacity(0.08), width: 1),
+          ),
+          child: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              const Text('🎁', style: TextStyle(fontSize: 15)),
+              const SizedBox(width: 8),
+              Text(
+                'Offrir le jeu physique Touchly',
+                style: TextStyle(
+                  color: _textSub.withOpacity(0.9),
+                  fontSize: 13,
+                  fontWeight: FontWeight.w700,
+                  decoration: TextDecoration.underline,
+                  decorationColor: _textSub.withOpacity(0.3),
+                ),
+              ),
+              const SizedBox(width: 6),
+              Icon(Icons.arrow_forward_rounded,
+                  color: _textSub.withOpacity(0.6), size: 14),
+            ],
+          ),
+        ),
       ),
     );
   }
@@ -575,7 +654,6 @@ class _TopBar extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return Row(children: [
-      // Logo
       Row(children: [
         Container(
           width: 100, height: 100,
@@ -601,7 +679,6 @@ class _TopBar extends StatelessWidget {
       ]),
       const Spacer(),
 
-      // Capsule utilisateur
       GestureDetector(
         onTap: () => _showLogoutDialog(context),
         child: Container(
@@ -760,7 +837,7 @@ class _LastThemeBanner extends StatelessWidget {
 
 class _EmptyBanner extends StatelessWidget {
   final VoidCallback  onStore;
-  final AppTheme?     demoTheme;       // ← thème joué en démo
+  final AppTheme?     demoTheme;
   final VoidCallback? onResumeDemoTheme;
 
   const _EmptyBanner({
@@ -771,7 +848,6 @@ class _EmptyBanner extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    // ── Cas 1 : un thème démo à proposer ─────────────────────────
     if (demoTheme != null && onResumeDemoTheme != null) {
       return Container(
         padding: const EdgeInsets.all(20),
@@ -788,7 +864,6 @@ class _EmptyBanner extends StatelessWidget {
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            // Badge "Démo jouée"
             Row(children: [
               Container(
                 padding: const EdgeInsets.symmetric(horizontal: 9, vertical: 5),
@@ -812,9 +887,7 @@ class _EmptyBanner extends StatelessWidget {
 
             const SizedBox(height: 14),
 
-            // Thème + message
             Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
-              // Icône thème avec halo
               Stack(alignment: Alignment.bottomRight, children: [
                 Container(
                   width: 56, height: 56,
@@ -889,7 +962,6 @@ class _EmptyBanner extends StatelessWidget {
 
             const SizedBox(height: 14),
 
-            // Mini barre progression
             Row(children: [
               Expanded(
                 child: ClipRRect(
@@ -912,7 +984,6 @@ class _EmptyBanner extends StatelessWidget {
 
             const SizedBox(height: 14),
 
-            // Boutons
             Row(children: [
               Expanded(
                 flex: 3,
@@ -969,7 +1040,6 @@ class _EmptyBanner extends StatelessWidget {
       );
     }
 
-    // ── Cas 2 : aucun thème, aucune démo ─────────────────────────
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 22),
       child: Column(children: [

@@ -4,8 +4,10 @@ import 'package:supabase_flutter/supabase_flutter.dart';
 import 'package:touchly/core/models/app_theme.dart';
 import 'package:touchly/features/onboarding/presentation/pages/end_of_round_sheet.dart';
 import 'package:touchly/features/onboarding/presentation/pages/home_page.dart';
+import 'package:touchly/features/onboarding/presentation/pages/points_service.dart';
+import 'package:touchly/features/onboarding/presentation/pages/round_events_zone.dart';
 import 'package:touchly/features/game/presentation/controllers/game_flow_controller.dart';
-
+import 'package:url_launcher/url_launcher.dart';
 import 'package:touchly/features/game/presentation/controllers/game_session_controller.dart';
 import 'package:touchly/features/onboarding/presentation/pages/score_floating_handle.dart';
 import 'package:touchly/features/onboarding/presentation/pages/victory_page.dart';
@@ -35,6 +37,8 @@ class Question {
   final String correctAnswer;
   final int difficulty;
   final String? anecdote;
+  final String? anecdoteSource;     // ← NOUVEAU
+  final String? anecdoteSourceUrl;  // ← NOUVEAU
 
   Question({
     required this.id,
@@ -45,6 +49,8 @@ class Question {
     required this.correctAnswer,
     this.difficulty = 1,
     this.anecdote,
+    this.anecdoteSource,
+    this.anecdoteSourceUrl,
   });
 
   factory Question.fromMap(Map<String, dynamic> m) => Question(
@@ -56,6 +62,8 @@ class Question {
     correctAnswer: m['correct_answer'] as String,
     difficulty: m['difficulty'] as int? ?? 1,
     anecdote: m['anecdote'] as String?,
+    anecdoteSource: m['anecdote_source'] as String?,           // ← NOUVEAU
+    anecdoteSourceUrl: m['anecdote_source_url'] as String?,    // ← NOUVEAU
   );
 
   String text(String letter) {
@@ -74,7 +82,7 @@ class Question {
 class GamePlayPage extends StatefulWidget {
   final AppTheme theme;
   final int startQuestionIndex; // ← démarre à la question N (0-based)
-  final GameSessionController session; // ← NOUVEAU : gère joueurs/score/bombes
+  final GameSessionController session; // ← gère joueurs/score/bombes
 
   const GamePlayPage({
     super.key,
@@ -92,6 +100,7 @@ class _GamePlayPageState extends State<GamePlayPage>
   List<Question> _questions    = [];
   int  _currentIndex           = 0;
   bool _loading                = true;
+  bool _gameEnded = false;
 
   late final GameFlowController _flow;
   late final AnimationController _slideCtrl;
@@ -103,6 +112,10 @@ class _GamePlayPageState extends State<GamePlayPage>
 
     _flow = GameFlowController();
     _flow.addListener(_onFlowChange);
+
+    // On écoute aussi la session : les exclusions "touché avant le GO"
+    // modifient l'affichage de la page (bannière RoundEventsZone).
+    widget.session.addListener(_onFlowChange);
 
     _slideCtrl = AnimationController(
         vsync: this, duration: const Duration(milliseconds: 380));
@@ -116,6 +129,7 @@ class _GamePlayPageState extends State<GamePlayPage>
   void dispose() {
     _flow.removeListener(_onFlowChange);
     _flow.dispose();
+    widget.session.removeListener(_onFlowChange);
     _slideCtrl.dispose();
     super.dispose();
   }
@@ -159,64 +173,52 @@ class _GamePlayPageState extends State<GamePlayPage>
     }
   }
 
-  // ─────────────────────────────────────────────
-  //  NOUVEAU : flow "fin de manche" → score/bombes/chance → victoire
-  // ─────────────────────────────────────────────
   Future<void> _nextQuestion() async {
-    if (!mounted) return;
+    if (!mounted || _gameEnded) return;
     HapticFeedback.lightImpact();
 
-    // 1. Popup bloquant : qui a la bonne réponse / une bombe / une chance
-    //    (ou "touché avant le GO" → relance de la manche sans le joueur)
     final outcome = await showEndOfRoundSheet(context, controller: widget.session);
     if (!mounted || outcome == null) return;
 
     widget.session.applyRoundResult(outcome);
 
-    // 2. Manche à rejouer (triche avant le GO) : on relit la même question,
-    //    sans changer de score ni avancer dans le paquet.
-    if (outcome.disqualifiedEarlyTouch) {
-      _slideCtrl.reset();
-      _slideCtrl.forward();
-      _flow.startQuestionFlow(_questions[_currentIndex].questionText);
-      return;
-    }
+    final isLastQuestion = _currentIndex >= _questions.length - 1;
 
-    // 3. Victoire ? (un joueur vient d'atteindre 5 points)
-    if (widget.session.hasWinner) {
-      Navigator.of(context).pushReplacement(
-        MaterialPageRoute(
-          builder: (_) => VictoryPage(
-            winner: widget.session.winner!,
-            onReplay: () => Navigator.of(context).pushAndRemoveUntil(
-              MaterialPageRoute(builder: (_) => const GameHomePage()),
-                  (_) => false,
-            ),
-            onHome: () => Navigator.of(context).pushAndRemoveUntil(
-              MaterialPageRoute(builder: (_) => const GameHomePage()),
-                  (_) => false,
+    if (widget.session.hasWinner || isLastQuestion) {
+      _gameEnded = true;
+      await PointsService.awardGameCompleted();
+      if (!mounted) return;
+
+      if (widget.session.hasWinner) {
+        Navigator.of(context).pushReplacement(
+          MaterialPageRoute(
+            builder: (_) => VictoryPage(
+              winner: widget.session.winner!,
+              onReplay: () => Navigator.of(context).pushAndRemoveUntil(
+                MaterialPageRoute(builder: (_) => const GameHomePage()),
+                    (_) => false,
+              ),
+              onHome: () => Navigator.of(context).pushAndRemoveUntil(
+                MaterialPageRoute(builder: (_) => const GameHomePage()),
+                    (_) => false,
+              ),
             ),
           ),
-        ),
-      );
+        );
+      } else {
+        Navigator.of(context).pushReplacement(
+          MaterialPageRoute(
+            builder: (_) => _GameResultPage(theme: widget.theme, total: _questions.length),
+          ),
+        );
+      }
       return;
     }
 
-    // 4. Sinon, comportement normal : question suivante ou fin du paquet
-    if (_currentIndex < _questions.length - 1) {
-      _slideCtrl.reset();
-      setState(() => _currentIndex++);
-      _slideCtrl.forward();
-      _flow.startQuestionFlow(_questions[_currentIndex].questionText);
-    } else {
-      final theme = widget.theme;
-      final total = _questions.length;
-      Navigator.of(context).pushReplacement(
-        MaterialPageRoute(
-          builder: (_) => _GameResultPage(theme: theme, total: total),
-        ),
-      );
-    }
+    _slideCtrl.reset();
+    setState(() => _currentIndex++);
+    _slideCtrl.forward();
+    _flow.startQuestionFlow(_questions[_currentIndex].questionText);
   }
 
   void _revealAnswer() {
@@ -249,6 +251,13 @@ class _GamePlayPageState extends State<GamePlayPage>
     final answersVisible = state == GameFlowState.answering ||
         state == GameFlowState.timeUp ||
         state == GameFlowState.revealing;
+
+    // La zone "touché avant le GO" est visible pendant toute la manche.
+    // Au moment du reveal, on ne la garde que si des joueurs sont déjà
+    // exclus (bannière de rappel) : plus besoin du bouton d'action,
+    // la manche est finie.
+    final showRoundEvents = state != GameFlowState.revealing ||
+        widget.session.excludedThisRound.isNotEmpty;
 
     return Scaffold(
       body: Container(
@@ -308,6 +317,15 @@ class _GamePlayPageState extends State<GamePlayPage>
                             if (state == GameFlowState.countdown)
                               _CountdownDisplay(value: _flow.countdownValue),
 
+                            // ── Événement de manche : touché avant le GO ──
+                            // Intégré au déroulement normal du tour, visible
+                            // dès la lecture de la question (c'est là que la
+                            // triche se produit) et pendant toute la manche.
+                            if (!answersVisible) ...[
+                              const SizedBox(height: 14),
+                              RoundEventsZone(controller: widget.session),
+                            ],
+
                             if (answersVisible) ...[
                               if (state == GameFlowState.answering)
                                 _AnswerTimerBar(
@@ -331,7 +349,18 @@ class _GamePlayPageState extends State<GamePlayPage>
                               if (state == GameFlowState.revealing &&
                                   q.anecdote != null &&
                                   q.anecdote!.trim().isNotEmpty)
-                                _AnecdoteCard(anecdote: q.anecdote!),
+                                _AnecdoteCard(
+                                  anecdote: q.anecdote!,
+                                  source: q.anecdoteSource,        // ← NOUVEAU
+                                  sourceUrl: q.anecdoteSourceUrl,  // ← NOUVEAU
+                                ),
+
+                              // Zone événements pendant la phase de réponse,
+                              // puis simple bannière de rappel au reveal.
+                              if (showRoundEvents) ...[
+                                const SizedBox(height: 6),
+                                RoundEventsZone(controller: widget.session),
+                              ],
 
                               const SizedBox(height: 16),
                               state == GameFlowState.revealing
@@ -920,9 +949,17 @@ class _AnswerCard extends StatelessWidget {
 }
 
 // ── Bloc anecdote — "Le saviez-vous ?" ──
+// ── Bloc anecdote — "Le saviez-vous ?" ──
 class _AnecdoteCard extends StatefulWidget {
   final String anecdote;
-  const _AnecdoteCard({required this.anecdote});
+  final String? source;
+  final String? sourceUrl;
+
+  const _AnecdoteCard({
+    required this.anecdote,
+    this.source,
+    this.sourceUrl,
+  });
 
   @override
   State<_AnecdoteCard> createState() => _AnecdoteCardState();
@@ -956,8 +993,23 @@ class _AnecdoteCardState extends State<_AnecdoteCard>
     super.dispose();
   }
 
+  Future<void> _openSource() async {
+    final url = widget.sourceUrl;
+    if (url == null || url.isEmpty) return;
+    final uri = Uri.tryParse(url);
+    if (uri == null) return;
+    try {
+      await launchUrl(uri, mode: LaunchMode.externalApplication);
+    } catch (_) {
+      // Échec silencieux : pas critique, on ne bloque pas l'expérience de jeu.
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
+    final hasSource = widget.source != null && widget.source!.trim().isNotEmpty;
+    final hasLink = widget.sourceUrl != null && widget.sourceUrl!.trim().isNotEmpty;
+
     return FadeTransition(
       opacity: _fade,
       child: SlideTransition(
@@ -978,64 +1030,108 @@ class _AnecdoteCardState extends State<_AnecdoteCard>
             borderRadius: BorderRadius.circular(20),
             border: Border.all(color: _answerB.withOpacity(0.35), width: 1.2),
           ),
-          child: Row(
+          child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              TweenAnimationBuilder<double>(
-                tween: Tween(begin: 0.6, end: 1.0),
-                duration: const Duration(milliseconds: 700),
-                curve: Curves.elasticOut,
-                builder: (context, scale, child) =>
-                    Transform.scale(scale: scale, child: child),
-                child: Container(
-                  width: 40,
-                  height: 40,
-                  decoration: BoxDecoration(
-                    shape: BoxShape.circle,
-                    color: _yellow.withOpacity(0.18),
-                    border: Border.all(
-                        color: _yellow.withOpacity(0.5), width: 1.5),
-                  ),
-                  child: const Center(
-                    child: Text('💡', style: TextStyle(fontSize: 18)),
-                  ),
-                ),
-              ),
-              const SizedBox(width: 14),
-              Expanded(
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Container(
-                      padding: const EdgeInsets.symmetric(
-                          horizontal: 8, vertical: 3),
+              Row(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  TweenAnimationBuilder<double>(
+                    tween: Tween(begin: 0.6, end: 1.0),
+                    duration: const Duration(milliseconds: 700),
+                    curve: Curves.elasticOut,
+                    builder: (context, scale, child) =>
+                        Transform.scale(scale: scale, child: child),
+                    child: Container(
+                      width: 40,
+                      height: 40,
                       decoration: BoxDecoration(
-                        color: _answerB.withOpacity(0.25),
-                        borderRadius: BorderRadius.circular(6),
+                        shape: BoxShape.circle,
+                        color: _yellow.withOpacity(0.18),
+                        border: Border.all(
+                            color: _yellow.withOpacity(0.5), width: 1.5),
                       ),
-                      child: const Text(
-                        'LE SAVAIS-TU ?',
-                        style: TextStyle(
-                          color: Color(0xFFE9D5FF),
-                          fontSize: 10,
-                          fontWeight: FontWeight.w900,
-                          letterSpacing: 0.8,
+                      child: const Center(
+                        child: Text('💡', style: TextStyle(fontSize: 18)),
+                      ),
+                    ),
+                  ),
+                  const SizedBox(width: 14),
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Container(
+                          padding: const EdgeInsets.symmetric(
+                              horizontal: 8, vertical: 3),
+                          decoration: BoxDecoration(
+                            color: _answerB.withOpacity(0.25),
+                            borderRadius: BorderRadius.circular(6),
+                          ),
+                          child: const Text(
+                            'LE SAVAIS-TU ?',
+                            style: TextStyle(
+                              color: Color(0xFFE9D5FF),
+                              fontSize: 10,
+                              fontWeight: FontWeight.w900,
+                              letterSpacing: 0.8,
+                            ),
+                          ),
+                        ),
+                        const SizedBox(height: 8),
+                        Text(
+                          widget.anecdote,
+                          style: const TextStyle(
+                            color: _textPrimary,
+                            fontSize: 13.5,
+                            fontWeight: FontWeight.w500,
+                            height: 1.4,
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                ],
+              ),
+
+              // ── Source — discrète, en bas de carte ──
+              if (hasSource) ...[
+                const SizedBox(height: 12),
+                Container(
+                  height: 1,
+                  color: Colors.white.withOpacity(0.08),
+                ),
+                const SizedBox(height: 10),
+                GestureDetector(
+                  onTap: hasLink ? _openSource : null,
+                  child: Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      Icon(
+                        hasLink ? Icons.link_rounded : Icons.info_outline_rounded,
+                        size: 12,
+                        color: _textSub.withOpacity(0.6),
+                      ),
+                      const SizedBox(width: 5),
+                      Flexible(
+                        child: Text(
+                          'Source : ${widget.source}',
+                          style: TextStyle(
+                            color: _textSub.withOpacity(0.75),
+                            fontSize: 11,
+                            fontWeight: FontWeight.w600,
+                            decoration: hasLink
+                                ? TextDecoration.underline
+                                : TextDecoration.none,
+                            decorationColor: _textSub.withOpacity(0.4),
+                          ),
+                          overflow: TextOverflow.ellipsis,
                         ),
                       ),
-                    ),
-                    const SizedBox(height: 8),
-                    Text(
-                      widget.anecdote,
-                      style: const TextStyle(
-                        color: _textPrimary,
-                        fontSize: 13.5,
-                        fontWeight: FontWeight.w500,
-                        height: 1.4,
-                      ),
-                    ),
-                  ],
+                    ],
+                  ),
                 ),
-              ),
+              ],
             ],
           ),
         ),

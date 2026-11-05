@@ -4,6 +4,7 @@ import 'package:flutter/services.dart';
 import 'package:flutter_tts/flutter_tts.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 import 'package:touchly/features/onboarding/presentation/pages/activation_code_page.dart';
+import 'package:touchly/features/onboarding/presentation/pages/demo_theme_memory.dart';
 
 // ─────────────────────────────────────────────
 //  Design tokens Touchly
@@ -24,12 +25,12 @@ const _answerC  = Color(0xFFEC4899);
 // ── Modèle ────────────────────────────────────
 class _DemoQ {
   final String id, questionText, answerA, answerB, answerC, correctAnswer;
-  final String? anecdote; // ← NOUVEAU
+  final String? anecdote;
   const _DemoQ({
     required this.id, required this.questionText,
     required this.answerA, required this.answerB,
     required this.answerC, required this.correctAnswer,
-    this.anecdote, // ← NOUVEAU
+    this.anecdote,
   });
   factory _DemoQ.fromMap(Map<String, dynamic> m) => _DemoQ(
     id: m['id'] as String,
@@ -38,7 +39,7 @@ class _DemoQ {
     answerB: m['answer_b'] as String,
     answerC: m['answer_c'] as String,
     correctAnswer: m['correct_answer'] as String,
-    anecdote: m['anecdote'] as String?, // ← NOUVEAU
+    anecdote: m['anecdote'] as String?,
   );
   String text(String l) {
     switch (l) { case 'A': return answerA; case 'B': return answerB; default: return answerC; }
@@ -53,7 +54,21 @@ enum _DemoState { loading, readingQuestion, countdown, answering, timeUp, reveal
 // ─────────────────────────────────────────────
 class DemoGamePage extends StatefulWidget {
   final VoidCallback onUnlock; // → ActivationCodePage
-  const DemoGamePage({super.key, required this.onUnlock});
+
+  /// ID du thème choisi dans le carrousel de l'onboarding.
+  /// Si null, on retombe sur le premier thème actif disponible
+  /// (comportement de secours, ne devrait pas arriver en pratique).
+  final String? themeId;
+
+  /// Nom du thème choisi, affiché dans la TopBar ("Mode Démo — Pokémon").
+  final String? themeName;
+
+  const DemoGamePage({
+    super.key,
+    required this.onUnlock,
+    this.themeId,
+    this.themeName,
+  });
 
   @override
   State<DemoGamePage> createState() => _DemoGamePageState();
@@ -68,9 +83,10 @@ class _DemoGamePageState extends State<DemoGamePage>
   int  _idx      = 0;
   bool _revealed = false;
   String? _loadError;
+  String  _themeLabel = 'Mode Démo';
 
   _DemoState _state = _DemoState.loading;
-  int? _countdown;          // 3,2,1,0 pendant countdown
+  int? _countdown;
   int  _secondsLeft = _answerSecs;
 
   // TTS
@@ -89,6 +105,17 @@ class _DemoGamePageState extends State<DemoGamePage>
   @override
   void initState() {
     super.initState();
+
+    _themeLabel = widget.themeName != null && widget.themeName!.isNotEmpty
+        ? 'Mode Démo — ${widget.themeName}'
+        : 'Mode Démo';
+
+    // Mémorise le thème dès le lancement de la démo — même si
+    // l'utilisateur quitte avant la fin, on saura quel thème lui
+    // proposer de reprendre une fois inscrit/connecté.
+    if (widget.themeId != null) {
+      DemoThemeMemory.save(widget.themeId!);
+    }
 
     _slideCtrl = AnimationController(
         vsync: this, duration: const Duration(milliseconds: 380));
@@ -138,16 +165,24 @@ class _DemoGamePageState extends State<DemoGamePage>
   // ── Chargement ────────────────────────────────
   Future<void> _loadQuestions() async {
     try {
-      final themes = await Supabase.instance.client
-          .from('themes').select('id, name').eq('is_active', true) as List;
+      String? themeId = widget.themeId;
 
-      String? themeId;
-      for (final t in themes) {
-        if ((t['name'] as String).toLowerCase().contains('pok')) {
-          themeId = t['id'] as String; break;
+      // Filet de sécurité si jamais aucun thème n'a été transmis
+      // (ne devrait pas arriver depuis le carrousel de l'onboarding).
+      if (themeId == null) {
+        final fallback = await Supabase.instance.client
+            .from('themes')
+            .select('id, name')
+            .eq('is_active', true)
+            .limit(1) as List;
+        if (fallback.isNotEmpty) {
+          themeId = fallback.first['id'] as String;
+          if (_themeLabel == 'Mode Démo') {
+            _themeLabel = 'Mode Démo — ${fallback.first['name']}';
+          }
         }
       }
-      themeId ??= themes.isNotEmpty ? themes.first['id'] as String : null;
+
       if (themeId == null) { _setError('Aucun thème disponible.'); return; }
 
       final data = await Supabase.instance.client
@@ -156,7 +191,7 @@ class _DemoGamePageState extends State<DemoGamePage>
           .limit(20) as List;
 
       final list = data.map((e) => _DemoQ.fromMap(e as Map<String, dynamic>)).toList()..shuffle();
-      if (list.isEmpty) { _setError('Aucune question disponible.'); return; }
+      if (list.isEmpty) { _setError('Aucune question disponible pour ce thème.'); return; }
 
       if (mounted) {
         setState(() => _questions = list.take(_maxQ).toList());
@@ -178,10 +213,8 @@ class _DemoGamePageState extends State<DemoGamePage>
     if (!mounted) return;
     final q = _questions[_idx];
 
-    // 1. READING
     setState(() { _state = _DemoState.readingQuestion; _revealed = false; });
 
-    // Lit question + réponses
     final fullText =
         '${q.questionText}. '
         'Réponse A : ${q.answerA}. '
@@ -191,7 +224,6 @@ class _DemoGamePageState extends State<DemoGamePage>
     await _waitSpeech();
     if (!mounted) return;
 
-    // 2. COUNTDOWN 3-2-1-Go
     setState(() => _state = _DemoState.countdown);
     for (final v in [3, 2, 1, 0]) {
       if (!mounted) return;
@@ -201,7 +233,6 @@ class _DemoGamePageState extends State<DemoGamePage>
     }
     if (!mounted) return;
 
-    // 3. ANSWERING
     _startTimer();
   }
 
@@ -226,7 +257,6 @@ class _DemoGamePageState extends State<DemoGamePage>
     _answerTimer?.cancel();
     HapticFeedback.mediumImpact();
     setState(() { _state = _DemoState.revealing; _revealed = true; });
-    // Lit la bonne réponse à voix haute
     final q = _questions[_idx];
     final label = q.correctAnswer == 'A' ? q.answerA
         : q.correctAnswer == 'B' ? q.answerB : q.answerC;
@@ -245,7 +275,6 @@ class _DemoGamePageState extends State<DemoGamePage>
     _answerTimer?.cancel();
 
     if (_idx >= _questions.length - 1) {
-      // Fin de la démo
       setState(() => _state = _DemoState.endDemo);
       return;
     }
@@ -260,13 +289,11 @@ class _DemoGamePageState extends State<DemoGamePage>
   // ─────────────────────────────────────────────
   @override
   Widget build(BuildContext context) {
-    // Écran fin de démo
     if (_state == _DemoState.endDemo) {
       return _EndDemoScreen(onUnlock: widget.onUnlock,
           onBack: () => Navigator.pop(context));
     }
 
-    // Erreur
     if (_loadError != null) {
       return _FullBg(child: Center(
         child: Padding(padding: const EdgeInsets.all(32), child: Column(
@@ -284,7 +311,6 @@ class _DemoGamePageState extends State<DemoGamePage>
       ));
     }
 
-    // Chargement
     if (_state == _DemoState.loading || _questions.isEmpty) {
       return _FullBg(child: const Center(
         child: SizedBox(width: 36, height: 36,
@@ -304,15 +330,14 @@ class _DemoGamePageState extends State<DemoGamePage>
         child: SafeArea(
           child: Column(
             children: [
-              // ── TopBar ──────────────────────
               _DemoTopBar(
                 current: _idx + 1,
                 total: _questions.length,
                 progress: progress,
+                themeLabel: _themeLabel,
                 onExit: () => _showExitDialog(),
               ),
 
-              // ── Badge mode démo ─────────────
               Padding(
                 padding: const EdgeInsets.fromLTRB(20, 10, 20, 0),
                 child: _DemoBadge(state: _state),
@@ -326,11 +351,9 @@ class _DemoGamePageState extends State<DemoGamePage>
                     padding: const EdgeInsets.fromLTRB(20, 14, 20, 24),
                     child: Column(
                       children: [
-                        // Carte question
                         _QuestionCard(question: q),
                         const SizedBox(height: 16),
 
-                        // Zone dynamique
                         if (_state == _DemoState.readingQuestion)
                           _ReadingView(onSkip: _skipToAnswering),
 
@@ -339,7 +362,6 @@ class _DemoGamePageState extends State<DemoGamePage>
                               value: _countdown, pulse: _pulseAnim),
 
                         if (answersVisible) ...[
-                          // Timer — seulement si on joue
                           if (_state == _DemoState.answering)
                             _TimerBar(
                                 secondsLeft: _secondsLeft,
@@ -366,7 +388,6 @@ class _DemoGamePageState extends State<DemoGamePage>
 
                           const SizedBox(height: 16),
 
-                          // Boutons — masqués pendant la lecture et le countdown
                           if (_state == _DemoState.revealing)
                             _ActionBtn(
                               label: _idx < _questions.length - 1
@@ -376,14 +397,13 @@ class _DemoGamePageState extends State<DemoGamePage>
                               textColor: _idx < _questions.length - 1 ? _white : _navy,
                               onTap: _nextQuestion,
                             )
-                          else if (_state == _DemoState.answering)   // ← seulement si on joue
+                          else if (_state == _DemoState.answering)
                             _ActionBtn(
                               label: '👁️  Révéler la réponse',
                               color: _yellow,
                               textColor: _navy,
                               onTap: _revealNow,
                             ),
-                          // Pendant readingQuestion et countdown : aucun bouton affiché
                         ],
                       ],
                     ),
@@ -436,7 +456,7 @@ class _AnecdoteCardState extends State<_AnecdoteCard>
   late final Animation<double> _fade;
   late final Animation<Offset> _slide;
 
-  static const _accent = _answerB; // violet — cohérent avec le thème Pokémon
+  static const _accent = _answerB;
 
   @override
   void initState() {
@@ -548,9 +568,19 @@ class _AnecdoteCardState extends State<_AnecdoteCard>
   }
 }
 
-// ─────────────────────────────────────────────
-//  Écran fin de démo — accrocheur
-// ─────────────────────────────────────────────
+// ═════════════════════════════════════════════════════════════════════════
+//  Écran fin de démo — REDESIGN
+//  À copier-coller à la place de tes classes `_EndDemoScreen` et `_PerkCard`
+//  existantes. Le reste du fichier (tokens, _FullBg, _TlBtn…) est inchangé.
+// ═════════════════════════════════════════════════════════════════════════
+
+// Petit modèle interne pour lister les fonctionnalités du jeu complet.
+class _Feature {
+  final String emoji, title, sub;
+  final Color accent;
+  const _Feature(this.emoji, this.title, this.sub, this.accent);
+}
+
 class _EndDemoScreen extends StatefulWidget {
   final VoidCallback onUnlock;
   final VoidCallback onBack;
@@ -561,132 +591,316 @@ class _EndDemoScreen extends StatefulWidget {
 }
 
 class _EndDemoScreenState extends State<_EndDemoScreen>
-    with SingleTickerProviderStateMixin {
-  late final AnimationController _ctrl;
-  late final Animation<double>   _scaleAnim;
-  late final Animation<double>   _fadeAnim;
+    with TickerProviderStateMixin {
+  late final AnimationController _intro; // entrée (scale + fade)
+  late final Animation<double> _scaleAnim, _fadeAnim;
+  late final AnimationController _pulse;  // halo pulsé derrière le trophée
+
+  // ── Les fonctionnalités mises en avant ──────────────────────────────
+  static const _features = <_Feature>[
+    _Feature('🎯', 'Des centaines de questions',
+        'Football, Pokémon, Cinéma, Science…', _answerA),
+    _Feature('🎙️', 'Voix off automatique',
+        "Le maître du jeu n'a rien à lire", _answerB),
+    _Feature('🎵', 'Blind tests & modes de jeu',
+        'Musical, rapidité, détente…', _answerC),
+    _Feature('🛍️', 'Nouveaux thèmes',
+        'Mis à jour régulièrement dans la boutique', _correct),
+  ];
 
   @override
   void initState() {
     super.initState();
-    _ctrl = AnimationController(vsync: this,
-        duration: const Duration(milliseconds: 700));
+    _intro = AnimationController(
+        vsync: this, duration: const Duration(milliseconds: 700));
     _scaleAnim = Tween<double>(begin: 0.7, end: 1.0)
-        .animate(CurvedAnimation(parent: _ctrl, curve: Curves.easeOutBack));
+        .animate(CurvedAnimation(parent: _intro, curve: Curves.easeOutBack));
     _fadeAnim = Tween<double>(begin: 0, end: 1)
-        .animate(CurvedAnimation(parent: _ctrl, curve: Curves.easeOut));
-    _ctrl.forward();
+        .animate(CurvedAnimation(parent: _intro, curve: Curves.easeOut));
+    _pulse = AnimationController(
+        vsync: this, duration: const Duration(milliseconds: 2200))..repeat();
+    _intro.forward();
   }
 
   @override
-  void dispose() { _ctrl.dispose(); super.dispose(); }
+  void dispose() {
+    _intro.dispose();
+    _pulse.dispose();
+    super.dispose();
+  }
 
   @override
   Widget build(BuildContext context) {
     return Scaffold(
       body: _FullBg(
         child: SafeArea(
-          child: Padding(
-            padding: const EdgeInsets.fromLTRB(24, 32, 24, 40),
-            child: Column(
-              children: [
-                // Haut : trophée animé
-                Expanded(
+          child: Column(
+            children: [
+              // ── Contenu défilable (au cas où petit écran) ───────────
+              Expanded(
+                child: SingleChildScrollView(
+                  physics: const BouncingScrollPhysics(),
+                  padding: const EdgeInsets.fromLTRB(24, 20, 24, 8),
                   child: FadeTransition(
                     opacity: _fadeAnim,
-                    child: ScaleTransition(
-                      scale: _scaleAnim,
-                      child: Column(
-                        mainAxisAlignment: MainAxisAlignment.center,
-                        children: [
-                          // Halo étoilé
-                          Stack(alignment: Alignment.center, children: [
-                            Container(width: 160, height: 160,
-                                decoration: BoxDecoration(shape: BoxShape.circle,
-                                    color: _yellow.withOpacity(0.08))),
-                            Container(width: 120, height: 120,
-                                decoration: BoxDecoration(shape: BoxShape.circle,
-                                    color: _yellow.withOpacity(0.14),
-                                    border: Border.all(color: _yellow.withOpacity(0.3), width: 2))),
-                            const Text('🏆', style: TextStyle(fontSize: 64)),
-                          ]),
-                          const SizedBox(height: 24),
+                    child: Column(
+                      children: [
+                        // ── HERO trophée ─────────────────────────────
+                        ScaleTransition(
+                          scale: _scaleAnim,
+                          child: SizedBox(
+                            height: 190,
+                            child: Stack(
+                              alignment: Alignment.center,
+                              children: [
+                                // Halos pulsés
+                                AnimatedBuilder(
+                                  animation: _pulse,
+                                  builder: (_, __) {
+                                    final t = _pulse.value;
+                                    return Stack(
+                                      alignment: Alignment.center,
+                                      children: [
+                                        _haloRing(120 + t * 70, (1 - t) * 0.25),
+                                        _haloRing(120 + ((t + 0.5) % 1) * 70,
+                                            (1 - ((t + 0.5) % 1)) * 0.22),
+                                      ],
+                                    );
+                                  },
+                                ),
+                                // Petites étoiles décoratives
+                                const Positioned(
+                                    top: 8, left: 40,
+                                    child: Text('✨', style: TextStyle(fontSize: 20))),
+                                const Positioned(
+                                    top: 24, right: 44,
+                                    child: Text('⭐', style: TextStyle(fontSize: 16))),
+                                const Positioned(
+                                    bottom: 18, left: 60,
+                                    child: Text('⭐', style: TextStyle(fontSize: 14))),
+                                // Badge trophée
+                                Container(
+                                  width: 128, height: 128,
+                                  decoration: BoxDecoration(
+                                    shape: BoxShape.circle,
+                                    gradient: RadialGradient(colors: [
+                                      _yellow.withOpacity(0.28),
+                                      _yellow.withOpacity(0.06),
+                                    ]),
+                                    border: Border.all(
+                                        color: _yellow.withOpacity(0.45),
+                                        width: 2),
+                                    boxShadow: [
+                                      BoxShadow(
+                                          color: _yellow.withOpacity(0.35),
+                                          blurRadius: 40, spreadRadius: 2),
+                                    ],
+                                  ),
+                                  child: const Center(
+                                    child: Text('🏆',
+                                        style: TextStyle(fontSize: 62)),
+                                  ),
+                                ),
+                              ],
+                            ),
+                          ),
+                        ),
+                        const SizedBox(height: 12),
 
-                          const Text('Tu as adoré !', style: TextStyle(
-                              color: _yellow, fontSize: 32,
-                              fontWeight: FontWeight.w900, letterSpacing: -0.5)),
-                          const SizedBox(height: 10),
-                          const Text(
-                              'La démo est terminée.\nDébloque le jeu complet pour\ndes centaines de questions !',
+                        // ── Titre + accroche ─────────────────────────
+                        ScaleTransition(
+                          scale: _scaleAnim,
+                          child: Column(children: [
+                            const Text('Tu as adoré ! 🎉',
+                                style: TextStyle(
+                                    color: _yellow, fontSize: 30,
+                                    fontWeight: FontWeight.w900,
+                                    letterSpacing: -0.5)),
+                            const SizedBox(height: 8),
+                            Text(
+                              'Ça, c\'était juste un aperçu.\nVoilà tout ce qui t\'attend 👇',
                               textAlign: TextAlign.center,
-                              style: TextStyle(color: _textSub, fontSize: 15, height: 1.5)),
-                          const SizedBox(height: 32),
+                              style: TextStyle(
+                                  color: _textSub.withOpacity(0.95),
+                                  fontSize: 14.5, height: 1.5,
+                                  fontWeight: FontWeight.w600),
+                            ),
+                          ]),
+                        ),
+                        const SizedBox(height: 22),
 
-                          // Cards avantages
-                          _PerkCard(emoji: '🎯', label: 'Des centaines de questions',
-                              sub: 'Football, Pokémon, Cinéma, Science...'),
-                          const SizedBox(height: 10),
-                          _PerkCard(emoji: '🎙️', label: 'Voix off automatique',
-                              sub: 'Le maître du jeu n\'a rien à lire'),
-                          const SizedBox(height: 10),
-                          _PerkCard(emoji: '🛍️', label: 'Nouveaux thèmes',
-                              sub: 'Mis à jour régulièrement dans la boutique'),
-                        ],
-                      ),
+                        // ── Bandeau "JEU COMPLET" ────────────────────
+                        Row(children: [
+                          Expanded(
+                              child: Container(height: 1,
+                                  color: Colors.white.withOpacity(0.1))),
+                          Padding(
+                            padding:
+                            const EdgeInsets.symmetric(horizontal: 12),
+                            child: Container(
+                              padding: const EdgeInsets.symmetric(
+                                  horizontal: 12, vertical: 5),
+                              decoration: BoxDecoration(
+                                color: _yellow.withOpacity(0.12),
+                                borderRadius: BorderRadius.circular(20),
+                                border: Border.all(
+                                    color: _yellow.withOpacity(0.3)),
+                              ),
+                              child: const Text('🔓  JEU COMPLET',
+                                  style: TextStyle(
+                                      color: _yellow, fontSize: 11,
+                                      fontWeight: FontWeight.w900,
+                                      letterSpacing: 0.8)),
+                            ),
+                          ),
+                          Expanded(
+                              child: Container(height: 1,
+                                  color: Colors.white.withOpacity(0.1))),
+                        ]),
+                        const SizedBox(height: 16),
+
+                        // ── Cartes fonctionnalités ───────────────────
+                        ...List.generate(_features.length, (i) {
+                          final f = _features[i];
+                          return Padding(
+                            padding: const EdgeInsets.only(bottom: 11),
+                            child: _PerkCard(
+                                feature: f, delayMs: 120 + i * 90),
+                          );
+                        }),
+                      ],
                     ),
                   ),
                 ),
+              ),
 
-                const SizedBox(height: 24),
-
-                // Bouton principal — très visible
-                _TlBtn(
-                  label: '🔑  Débloquer avec mon code',
-                  primary: true,
-                  onTap: () => Navigator.push(
-                    context,
-                    MaterialPageRoute(builder: (_) => const ActivationCodePage()),
+              // ── CTA fixés en bas ────────────────────────────────────
+              Padding(
+                padding: const EdgeInsets.fromLTRB(24, 6, 24, 22),
+                child: Column(children: [
+                  _TlBtn(
+                    label: '🔑  Débloquer avec mon code',
+                    primary: true,
+                    onTap: () => Navigator.push(
+                      context,
+                      MaterialPageRoute(
+                          builder: (_) => const ActivationCodePage()),
+                    ),
                   ),
-                ),
-                const SizedBox(height: 12),
-                _TlBtn(
-                  label: 'Rejouer la démo',
-                  primary: false,
-                  onTap: widget.onBack,
-                ),
-              ],
-            ),
+                  const SizedBox(height: 12),
+                  _TlBtn(
+                    label: '🔁  Rejouer la démo',
+                    primary: false,
+                    onTap: widget.onBack,
+                  ),
+                ]),
+              ),
+            ],
           ),
         ),
       ),
     );
   }
+
+  // Anneau de halo (cercle bordé translucide).
+  Widget _haloRing(double size, double opacity) => Container(
+    width: size, height: size,
+    decoration: BoxDecoration(
+      shape: BoxShape.circle,
+      border: Border.all(
+          color: _yellow.withOpacity(opacity.clamp(0, 1)), width: 1.5),
+    ),
+  );
 }
 
-class _PerkCard extends StatelessWidget {
-  final String emoji, label, sub;
-  const _PerkCard({required this.emoji, required this.label, required this.sub});
+// ── Carte fonctionnalité (accent coloré + entrée animée) ────────────────
+class _PerkCard extends StatefulWidget {
+  final _Feature feature;
+  final int delayMs;
+  const _PerkCard({required this.feature, this.delayMs = 0});
 
   @override
-  Widget build(BuildContext context) => Container(
-    padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
-    decoration: BoxDecoration(
-      color: Colors.white.withOpacity(0.06),
-      borderRadius: BorderRadius.circular(14),
-      border: Border.all(color: Colors.white.withOpacity(0.1), width: 1),
-    ),
-    child: Row(children: [
-      Text(emoji, style: const TextStyle(fontSize: 26)),
-      const SizedBox(width: 14),
-      Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-        Text(label, style: const TextStyle(color: _white,
-            fontSize: 14, fontWeight: FontWeight.w800)),
-        const SizedBox(height: 2),
-        Text(sub, style: const TextStyle(color: _textSub, fontSize: 12)),
-      ])),
-      const Icon(Icons.check_circle_rounded, color: _correct, size: 18),
-    ]),
-  );
+  State<_PerkCard> createState() => _PerkCardState();
+}
+
+class _PerkCardState extends State<_PerkCard>
+    with SingleTickerProviderStateMixin {
+  late final AnimationController _c;
+
+  @override
+  void initState() {
+    super.initState();
+    _c = AnimationController(
+        vsync: this, duration: const Duration(milliseconds: 480));
+    Future.delayed(Duration(milliseconds: widget.delayMs), () {
+      if (mounted) _c.forward();
+    });
+  }
+
+  @override
+  void dispose() {
+    _c.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final f = widget.feature;
+    return FadeTransition(
+      opacity: _c,
+      child: SlideTransition(
+        position: Tween<Offset>(
+            begin: const Offset(0.15, 0), end: Offset.zero)
+            .animate(CurvedAnimation(parent: _c, curve: Curves.easeOutCubic)),
+        child: Container(
+          padding: const EdgeInsets.all(14),
+          decoration: BoxDecoration(
+            gradient: LinearGradient(
+              begin: Alignment.centerLeft,
+              end: Alignment.centerRight,
+              colors: [
+                f.accent.withOpacity(0.20),
+                f.accent.withOpacity(0.05),
+              ],
+            ),
+            borderRadius: BorderRadius.circular(18),
+            border: Border.all(color: f.accent.withOpacity(0.35), width: 1.2),
+          ),
+          child: Row(children: [
+            // Icône dans un carré coloré
+            Container(
+              width: 48, height: 48,
+              decoration: BoxDecoration(
+                color: f.accent.withOpacity(0.22),
+                borderRadius: BorderRadius.circular(14),
+                border: Border.all(color: f.accent.withOpacity(0.45)),
+              ),
+              child: Center(
+                  child: Text(f.emoji, style: const TextStyle(fontSize: 24))),
+            ),
+            const SizedBox(width: 14),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(f.title,
+                      style: const TextStyle(
+                          color: _white, fontSize: 14.5,
+                          fontWeight: FontWeight.w900, height: 1.2)),
+                  const SizedBox(height: 3),
+                  Text(f.sub,
+                      style: const TextStyle(
+                          color: _textSub, fontSize: 12, height: 1.3)),
+                ],
+              ),
+            ),
+            const SizedBox(width: 8),
+            Icon(Icons.check_circle_rounded, color: f.accent, size: 22),
+          ]),
+        ),
+      ),
+    );
+  }
 }
 
 // ─────────────────────────────────────────────
@@ -724,9 +938,10 @@ class _FullBg extends StatelessWidget {
 class _DemoTopBar extends StatelessWidget {
   final int current, total;
   final double progress;
+  final String themeLabel;
   final VoidCallback onExit;
   const _DemoTopBar({required this.current, required this.total,
-    required this.progress, required this.onExit});
+    required this.progress, required this.themeLabel, required this.onExit});
 
   @override
   Widget build(BuildContext context) => Padding(
@@ -742,11 +957,14 @@ class _DemoTopBar extends StatelessWidget {
             ),
             child: const Icon(Icons.close_rounded, color: _white, size: 18))),
         const SizedBox(width: 12),
-        const Expanded(child: Row(children: [
-          Text('⚡', style: TextStyle(fontSize: 14)),
-          SizedBox(width: 6),
-          Text('Mode Démo — Pokémon',
-              style: TextStyle(color: _white, fontSize: 13, fontWeight: FontWeight.w800)),
+        Expanded(child: Row(children: [
+          const Text('⚡', style: TextStyle(fontSize: 14)),
+          const SizedBox(width: 6),
+          Flexible(
+            child: Text(themeLabel,
+                overflow: TextOverflow.ellipsis,
+                style: const TextStyle(color: _white, fontSize: 13, fontWeight: FontWeight.w800)),
+          ),
         ])),
         Container(
             padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),

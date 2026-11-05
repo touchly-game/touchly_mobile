@@ -6,13 +6,18 @@ import 'package:touchly/features/onboarding/presentation/pages/touchly_colors.da
 
 import 'game_player.dart';
 
-/// Ouvre le popup bloquant de fin de manche. Retourne `null` si
-/// jamais le contexte est fermé anormalement (ne devrait pas arriver
-/// puisque le sheet est non-dismissible), sinon un [RoundOutcome]
-/// prêt à être passé à `GameSessionController.applyRoundResult`.
+/// Ouvre le popup bloquant de fin de manche.
+///
+/// ⚠️ Un joueur ne peut recevoir qu'UNE SEULE carte par manche
+/// (bonne réponse OU bombe OU chance) — conforme aux règles physiques
+/// du jeu : on ne lance sa main qu'une fois et on n'attrape qu'une
+/// carte. Les 3 catégories de sélection sont donc mutuellement
+/// exclusives ci-dessous : un joueur déjà assigné à une catégorie est
+/// automatiquement grisé dans les deux autres.
 Future<RoundOutcome?> showEndOfRoundSheet(
     BuildContext context, {
       required GameSessionController controller,
+      String? roundLabel,
     }) {
   return showModalBottomSheet<RoundOutcome>(
     context: context,
@@ -20,31 +25,79 @@ Future<RoundOutcome?> showEndOfRoundSheet(
     enableDrag: false,
     isScrollControlled: true,
     backgroundColor: Colors.transparent,
-    builder: (_) => _EndOfRoundSheet(controller: controller),
+    builder: (_) => _EndOfRoundSheet(controller: controller, roundLabel: roundLabel),
   );
 }
 
 enum _BombResolution { keep, cancel, redirect }
 
+/// Catégorie de carte attribuée à un joueur pour la manche en cours.
+/// Sert uniquement à calculer les exclusions croisées entre grilles.
+enum _CardCategory { correct, bomb, chance }
+
 class _EndOfRoundSheet extends StatefulWidget {
   final GameSessionController controller;
-  const _EndOfRoundSheet({required this.controller});
+  final String? roundLabel;
+  const _EndOfRoundSheet({required this.controller, this.roundLabel});
 
   @override
   State<_EndOfRoundSheet> createState() => _EndOfRoundSheetState();
 }
 
 class _EndOfRoundSheetState extends State<_EndOfRoundSheet> {
-  bool _earlyTouch = false;
-  String? _earlyTouchPlayerId;
-
   String? _correctPlayerId;
   final Set<String> _bombIds = {};
   final Set<String> _chanceIds = {};
   final Map<String, _BombResolution> _resolutions = {};
   final Map<String, String> _redirectTargets = {};
 
-  List<GamePlayer> get _selectable => widget.controller.selectablePlayers;
+  /// Ids des joueurs exclus pour cette manche (touche avant le GO).
+  Set<String> get _excludedIds => widget.controller.excludedThisRoundIds;
+
+  /// Joueurs sélectionnables = joueurs habituels MOINS les exclus
+  /// de la manche. Ils ne peuvent ni marquer, ni recevoir de bombe,
+  /// ni recevoir de chance.
+  List<GamePlayer> get _selectable => widget.controller.selectablePlayers
+      .where((p) => !_excludedIds.contains(p.id))
+      .toList();
+
+  /// Catégorie actuellement attribuée à chaque joueur (une seule
+  /// carte par joueur et par manche).
+  Map<String, _CardCategory> get _assignments {
+    final map = <String, _CardCategory>{};
+    if (_correctPlayerId != null) map[_correctPlayerId!] = _CardCategory.correct;
+    for (final id in _bombIds) map[id] = _CardCategory.bomb;
+    for (final id in _chanceIds) map[id] = _CardCategory.chance;
+    return map;
+  }
+
+  /// Retire un joueur de toutes les catégories AUTRES que celle
+  /// passée en paramètre — garantit l'exclusivité "1 carte/joueur".
+  void _clearOtherCategories(String id, _CardCategory keep) {
+    if (keep != _CardCategory.correct && _correctPlayerId == id) {
+      _correctPlayerId = null;
+    }
+    if (keep != _CardCategory.bomb && _bombIds.contains(id)) {
+      _bombIds.remove(id);
+      _resolutions.remove(id);
+      _redirectTargets.remove(id);
+    }
+    if (keep != _CardCategory.chance && _chanceIds.contains(id)) {
+      _chanceIds.remove(id);
+    }
+  }
+
+  void _toggleCorrect(String id) {
+    HapticFeedback.selectionClick();
+    setState(() {
+      if (_correctPlayerId == id) {
+        _correctPlayerId = null;
+      } else {
+        _clearOtherCategories(id, _CardCategory.correct);
+        _correctPlayerId = id;
+      }
+    });
+  }
 
   void _toggleBomb(String id) {
     HapticFeedback.selectionClick();
@@ -54,6 +107,7 @@ class _EndOfRoundSheetState extends State<_EndOfRoundSheet> {
         _resolutions.remove(id);
         _redirectTargets.remove(id);
       } else {
+        _clearOtherCategories(id, _CardCategory.bomb);
         _bombIds.add(id);
         _resolutions[id] = _BombResolution.keep;
       }
@@ -66,6 +120,7 @@ class _EndOfRoundSheetState extends State<_EndOfRoundSheet> {
       if (_chanceIds.contains(id)) {
         _chanceIds.remove(id);
       } else {
+        _clearOtherCategories(id, _CardCategory.chance);
         _chanceIds.add(id);
       }
     });
@@ -98,7 +153,6 @@ class _EndOfRoundSheetState extends State<_EndOfRoundSheet> {
   }
 
   bool get _canConfirm {
-    if (_earlyTouch) return _earlyTouchPlayerId != null;
     final missingRedirectTarget = _bombIds.any((id) =>
     _resolutions[id] == _BombResolution.redirect &&
         _redirectTargets[id] == null);
@@ -107,16 +161,6 @@ class _EndOfRoundSheetState extends State<_EndOfRoundSheet> {
 
   void _confirm() {
     if (!_canConfirm) return;
-    if (_earlyTouch) {
-      Navigator.pop(
-        context,
-        RoundOutcome(
-          disqualifiedEarlyTouch: true,
-          disqualifiedPlayerId: _earlyTouchPlayerId,
-        ),
-      );
-      return;
-    }
     HapticFeedback.mediumImpact();
     Navigator.pop(
       context,
@@ -129,7 +173,8 @@ class _EndOfRoundSheetState extends State<_EndOfRoundSheet> {
 
   @override
   Widget build(BuildContext context) {
-    final players = widget.controller.activePlayers;
+    final excludedPlayers = widget.controller.excludedThisRound;
+    final assignments = _assignments;
 
     return DraggableScrollableSheet(
       initialChildSize: 0.88,
@@ -151,18 +196,27 @@ class _EndOfRoundSheetState extends State<_EndOfRoundSheet> {
                 borderRadius: BorderRadius.circular(3),
               ),
             ),
-            const Padding(
-              padding: EdgeInsets.fromLTRB(24, 16, 24, 4),
+            Padding(
+              padding: const EdgeInsets.fromLTRB(24, 16, 24, 4),
               child: Row(
                 children: [
-                  Text('🎯', style: TextStyle(fontSize: 22)),
-                  SizedBox(width: 8),
-                  Text('Fin de la manche',
-                      style: TextStyle(
-                          color: TouchlyColors.white,
-                          fontSize: 19,
-                          fontWeight: FontWeight.w900)),
+                  Text(widget.roundLabel != null ? '🔁' : '🎯', style: const TextStyle(fontSize: 22)),
+                  const SizedBox(width: 8),
+                  Text(widget.roundLabel ?? 'Fin de la manche',
+                      style: const TextStyle(
+                          color: TouchlyColors.white, fontSize: 19, fontWeight: FontWeight.w900)),
                 ],
+              ),
+            ),
+            Padding(
+              padding: const EdgeInsets.fromLTRB(24, 0, 24, 4),
+              child: Align(
+                alignment: Alignment.centerLeft,
+                child: Text(
+                  '1 carte attrapée par joueur — la sélection dans une catégorie retire le joueur des autres.',
+                  style: TextStyle(
+                      color: TouchlyColors.textSub.withOpacity(0.8), fontSize: 11.5, height: 1.3),
+                ),
               ),
             ),
             Expanded(
@@ -170,68 +224,69 @@ class _EndOfRoundSheetState extends State<_EndOfRoundSheet> {
                 controller: scrollController,
                 padding: const EdgeInsets.fromLTRB(24, 8, 24, 8),
                 children: [
-                  _EarlyTouchToggle(
-                    value: _earlyTouch,
-                    onChanged: (v) => setState(() {
-                      _earlyTouch = v;
-                      _earlyTouchPlayerId = null;
-                    }),
-                  ),
-                  if (_earlyTouch) ...[
-                    const SizedBox(height: 14),
-                    const _SectionLabel(emoji: '⚠️', label: 'Qui a touché trop tôt ?'),
-                    const SizedBox(height: 10),
-                    _PlayerChipGrid(
-                      players: players,
-                      selected: {if (_earlyTouchPlayerId != null) _earlyTouchPlayerId!},
-                      accent: TouchlyColors.warn,
-                      onTap: (id) => setState(() => _earlyTouchPlayerId = id),
-                    ),
-                  ] else ...[
+                  // ── Rappel des joueurs exclus (touche anticipée) ──
+                  if (excludedPlayers.isNotEmpty) ...[
+                    _ExcludedReminderCard(players: excludedPlayers),
                     const SizedBox(height: 18),
-                    const _SectionLabel(emoji: '✅', label: 'Qui a la bonne réponse ?'),
-                    const SizedBox(height: 10),
-                    _PlayerChipGrid(
-                      players: _selectable,
-                      selected: {if (_correctPlayerId != null) _correctPlayerId!},
-                      accent: TouchlyColors.correct,
-                      onTap: (id) => setState(
-                              () => _correctPlayerId = _correctPlayerId == id ? null : id),
-                    ),
+                  ],
+
+                  const _SectionLabel(emoji: '✅', label: 'Qui a la bonne réponse ?'),
+                  const SizedBox(height: 10),
+                  _PlayerChipGrid(
+                    players: _selectable,
+                    selected: {if (_correctPlayerId != null) _correctPlayerId!},
+                    disabledIds: assignments.entries
+                        .where((e) => e.value != _CardCategory.correct)
+                        .map((e) => e.key)
+                        .toSet(),
+                    accent: TouchlyColors.correct,
+                    onTap: _toggleCorrect,
+                  ),
+                  const SizedBox(height: 22),
+                  const _SectionLabel(emoji: '💣', label: 'Qui a chopé une Bombe ?'),
+                  const SizedBox(height: 10),
+                  _PlayerChipGrid(
+                    players: _selectable,
+                    selected: _bombIds,
+                    disabledIds: assignments.entries
+                        .where((e) => e.value != _CardCategory.bomb)
+                        .map((e) => e.key)
+                        .toSet(),
+                    accent: TouchlyColors.danger,
+                    onTap: _toggleBomb,
+                  ),
+                  if (_bombIds.isNotEmpty)
+                    ..._bombIds.map((id) => _BombResolutionRow(
+                      player: widget.controller.players.firstWhere((p) => p.id == id),
+                      resolution: _resolutions[id] ?? _BombResolution.keep,
+                      redirectTarget: _redirectTargets[id],
+                      chanceAvailable: _chanceIds.isNotEmpty,
+                      // Une redirection donne la bombe à un autre joueur : on
+                      // exclut donc aussi les joueurs déjà assignés ailleurs.
+                      candidates: _selectable
+                          .where((p) => p.id != id && !assignments.containsKey(p.id))
+                          .toList(),
+                      onResolutionChanged: (res) =>
+                          setState(() => _resolutions[id] = res),
+                      onTargetChanged: (targetId) =>
+                          setState(() => _redirectTargets[id] = targetId),
+                    )),
+                  const SizedBox(height: 22),
+                  const _SectionLabel(emoji: '🍀', label: 'Qui a chopé une Chance ?'),
+                  const SizedBox(height: 10),
+                  _PlayerChipGrid(
+                    players: _selectable,
+                    selected: _chanceIds,
+                    disabledIds: assignments.entries
+                        .where((e) => e.value != _CardCategory.chance)
+                        .map((e) => e.key)
+                        .toSet(),
+                    accent: TouchlyColors.answerB,
+                    onTap: _toggleChance,
+                  ),
+                  if (_upcomingSkippers.isNotEmpty) ...[
                     const SizedBox(height: 22),
-                    const _SectionLabel(emoji: '💣', label: 'Qui a chopé une Bombe ?'),
-                    const SizedBox(height: 10),
-                    _PlayerChipGrid(
-                      players: _selectable,
-                      selected: _bombIds,
-                      accent: TouchlyColors.danger,
-                      onTap: _toggleBomb,
-                    ),
-                    if (_bombIds.isNotEmpty)
-                      ..._bombIds.map((id) => _BombResolutionRow(
-                        player: widget.controller.players.firstWhere((p) => p.id == id),
-                        resolution: _resolutions[id] ?? _BombResolution.keep,
-                        redirectTarget: _redirectTargets[id],
-                        chanceAvailable: _chanceIds.isNotEmpty,
-                        candidates: _selectable.where((p) => p.id != id).toList(),
-                        onResolutionChanged: (res) =>
-                            setState(() => _resolutions[id] = res),
-                        onTargetChanged: (targetId) =>
-                            setState(() => _redirectTargets[id] = targetId),
-                      )),
-                    const SizedBox(height: 22),
-                    const _SectionLabel(emoji: '🍀', label: 'Qui a chopé une Chance ?'),
-                    const SizedBox(height: 10),
-                    _PlayerChipGrid(
-                      players: _selectable,
-                      selected: _chanceIds,
-                      accent: TouchlyColors.answerB,
-                      onTap: _toggleChance,
-                    ),
-                    if (_upcomingSkippers.isNotEmpty) ...[
-                      const SizedBox(height: 22),
-                      _SkipReminderCard(players: _upcomingSkippers),
-                    ],
+                    _SkipReminderCard(players: _upcomingSkippers),
                   ],
                   const SizedBox(height: 12),
                 ],
@@ -247,17 +302,15 @@ class _EndOfRoundSheetState extends State<_EndOfRoundSheet> {
                   height: 56,
                   decoration: BoxDecoration(
                     gradient: _canConfirm
-                        ? LinearGradient(colors: _earlyTouch
-                        ? [TouchlyColors.warn, const Color(0xFFFF8C5A)]
-                        : [TouchlyColors.yellow, TouchlyColors.yellowDeep])
+                        ? const LinearGradient(
+                        colors: [TouchlyColors.yellow, TouchlyColors.yellowDeep])
                         : null,
                     color: _canConfirm ? null : Colors.white.withOpacity(0.06),
                     borderRadius: BorderRadius.circular(16),
                     boxShadow: _canConfirm
                         ? [
                       BoxShadow(
-                          color: (_earlyTouch ? TouchlyColors.warn : TouchlyColors.yellow)
-                              .withOpacity(0.35),
+                          color: TouchlyColors.yellow.withOpacity(0.35),
                           blurRadius: 22,
                           offset: const Offset(0, 6)),
                     ]
@@ -265,7 +318,7 @@ class _EndOfRoundSheetState extends State<_EndOfRoundSheet> {
                   ),
                   child: Center(
                     child: Text(
-                      _earlyTouch ? '🔁  Rejouer la manche sans lui' : '✅  Confirmer et continuer',
+                      '✅  Confirmer et continuer',
                       style: TextStyle(
                           color: _canConfirm
                               ? TouchlyColors.navy
@@ -284,6 +337,49 @@ class _EndOfRoundSheetState extends State<_EndOfRoundSheet> {
   }
 }
 
+// ─────────────────────────────────────────────
+//  Rappel : joueurs exclus de cette manche
+// ─────────────────────────────────────────────
+class _ExcludedReminderCard extends StatelessWidget {
+  final List<GamePlayer> players;
+  const _ExcludedReminderCard({required this.players});
+
+  @override
+  Widget build(BuildContext context) => Container(
+    padding: const EdgeInsets.all(14),
+    decoration: BoxDecoration(
+      color: TouchlyColors.warn.withOpacity(0.1),
+      borderRadius: BorderRadius.circular(16),
+      border: Border.all(color: TouchlyColors.warn.withOpacity(0.3)),
+    ),
+    child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+      Row(children: [
+        const Text('🖐️', style: TextStyle(fontSize: 15)),
+        const SizedBox(width: 8),
+        Expanded(
+          child: Text(
+            players.length > 1
+                ? 'Exclus de cette manche (touche avant le GO)'
+                : 'Exclu de cette manche (touche avant le GO)',
+            style: const TextStyle(
+                color: TouchlyColors.warn,
+                fontSize: 12.5,
+                fontWeight: FontWeight.w900),
+          ),
+        ),
+      ]),
+      const SizedBox(height: 8),
+      Text(
+        '${players.map((p) => p.name).join(', ')} — pas de point, pas de bombe, pas de chance sur cette question. Retour au jeu dès la prochaine.',
+        style: TextStyle(
+            color: TouchlyColors.textSub.withOpacity(0.9),
+            fontSize: 12,
+            height: 1.4),
+      ),
+    ]),
+  );
+}
+
 class _SectionLabel extends StatelessWidget {
   final String emoji, label;
   const _SectionLabel({required this.emoji, required this.label});
@@ -298,56 +394,23 @@ class _SectionLabel extends StatelessWidget {
   ]);
 }
 
-class _EarlyTouchToggle extends StatelessWidget {
-  final bool value;
-  final ValueChanged<bool> onChanged;
-  const _EarlyTouchToggle({required this.value, required this.onChanged});
-
-  @override
-  Widget build(BuildContext context) => GestureDetector(
-    onTap: () => onChanged(!value),
-    child: Container(
-      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
-      decoration: BoxDecoration(
-        color: value ? TouchlyColors.warn.withOpacity(0.14) : Colors.white.withOpacity(0.05),
-        borderRadius: BorderRadius.circular(16),
-        border: Border.all(
-            color: value
-                ? TouchlyColors.warn.withOpacity(0.5)
-                : Colors.white.withOpacity(0.1)),
-      ),
-      child: Row(children: [
-        const Text('🖐️', style: TextStyle(fontSize: 18)),
-        const SizedBox(width: 10),
-        const Expanded(
-          child: Text('Un joueur a touché avant le GO ?',
-              style: TextStyle(
-                  color: TouchlyColors.white,
-                  fontSize: 13.5,
-                  fontWeight: FontWeight.w700)),
-        ),
-        Switch(
-          value: value,
-          onChanged: onChanged,
-          activeColor: TouchlyColors.warn,
-          activeTrackColor: TouchlyColors.warn.withOpacity(0.3),
-        ),
-      ]),
-    ),
-  );
-}
-
 class _PlayerChipGrid extends StatelessWidget {
   final List<GamePlayer> players;
   final Set<String> selected;
   final Color accent;
   final ValueChanged<String> onTap;
 
+  /// Joueurs déjà assignés à une AUTRE catégorie pour cette manche.
+  /// Ils sont grisés et non cliquables — un joueur ne peut recevoir
+  /// qu'une seule carte par manche.
+  final Set<String> disabledIds;
+
   const _PlayerChipGrid({
     required this.players,
     required this.selected,
     required this.accent,
     required this.onTap,
+    this.disabledIds = const {},
   });
 
   @override
@@ -363,43 +426,50 @@ class _PlayerChipGrid extends StatelessWidget {
         final idx = entry.key;
         final p = entry.value;
         final isSelected = selected.contains(p.id);
+        final isDisabled = disabledIds.contains(p.id);
         final color = TouchlyColors.avatarPalette[idx % TouchlyColors.avatarPalette.length];
+
         return GestureDetector(
-          onTap: () => onTap(p.id),
-          child: AnimatedContainer(
-            duration: const Duration(milliseconds: 200),
-            padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
-            decoration: BoxDecoration(
-              color: isSelected ? accent.withOpacity(0.22) : Colors.white.withOpacity(0.06),
-              borderRadius: BorderRadius.circular(14),
-              border: Border.all(
-                color: isSelected ? accent.withOpacity(0.7) : Colors.white.withOpacity(0.1),
-                width: isSelected ? 1.5 : 1,
+          onTap: isDisabled ? null : () => onTap(p.id),
+          child: Opacity(
+            opacity: isDisabled ? 0.35 : 1.0,
+            child: AnimatedContainer(
+              duration: const Duration(milliseconds: 200),
+              padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+              decoration: BoxDecoration(
+                color: isSelected ? accent.withOpacity(0.22) : Colors.white.withOpacity(0.06),
+                borderRadius: BorderRadius.circular(14),
+                border: Border.all(
+                  color: isSelected ? accent.withOpacity(0.7) : Colors.white.withOpacity(0.1),
+                  width: isSelected ? 1.5 : 1,
+                ),
               ),
+              child: Row(mainAxisSize: MainAxisSize.min, children: [
+                Container(
+                  width: 22,
+                  height: 22,
+                  decoration: BoxDecoration(
+                    shape: BoxShape.circle,
+                    color: isSelected ? accent : color.withOpacity(0.35),
+                  ),
+                  child: Center(
+                    child: isSelected
+                        ? const Icon(Icons.check_rounded, size: 14, color: TouchlyColors.navy)
+                        : isDisabled
+                        ? Icon(Icons.lock_rounded, size: 12, color: color.withOpacity(0.8))
+                        : Text(p.name.isNotEmpty ? p.name[0].toUpperCase() : '?',
+                        style: TextStyle(
+                            color: color, fontSize: 11, fontWeight: FontWeight.w900)),
+                  ),
+                ),
+                const SizedBox(width: 8),
+                Text(p.name,
+                    style: TextStyle(
+                        color: isSelected ? TouchlyColors.white : TouchlyColors.textSub,
+                        fontSize: 13.5,
+                        fontWeight: FontWeight.w700)),
+              ]),
             ),
-            child: Row(mainAxisSize: MainAxisSize.min, children: [
-              Container(
-                width: 22,
-                height: 22,
-                decoration: BoxDecoration(
-                  shape: BoxShape.circle,
-                  color: isSelected ? accent : color.withOpacity(0.35),
-                ),
-                child: Center(
-                  child: isSelected
-                      ? const Icon(Icons.check_rounded, size: 14, color: TouchlyColors.navy)
-                      : Text(p.name.isNotEmpty ? p.name[0].toUpperCase() : '?',
-                      style: TextStyle(
-                          color: color, fontSize: 11, fontWeight: FontWeight.w900)),
-                ),
-              ),
-              const SizedBox(width: 8),
-              Text(p.name,
-                  style: TextStyle(
-                      color: isSelected ? TouchlyColors.white : TouchlyColors.textSub,
-                      fontSize: 13.5,
-                      fontWeight: FontWeight.w700)),
-            ]),
           ),
         );
       }).toList(),
@@ -459,17 +529,23 @@ class _BombResolutionRow extends StatelessWidget {
         ]),
         if (resolution == _BombResolution.redirect) ...[
           const SizedBox(height: 10),
-          Wrap(
-            spacing: 8,
-            runSpacing: 8,
-            children: candidates
-                .map((c) => _ResPill(
-              label: c.name,
-              selected: redirectTarget == c.id,
-              onTap: () => onTargetChanged(c.id),
-            ))
-                .toList(),
-          ),
+          if (candidates.isEmpty)
+            Text(
+              'Aucun joueur disponible pour la redirection (tous déjà assignés).',
+              style: TextStyle(color: TouchlyColors.textSub.withOpacity(0.7), fontSize: 11.5),
+            )
+          else
+            Wrap(
+              spacing: 8,
+              runSpacing: 8,
+              children: candidates
+                  .map((c) => _ResPill(
+                label: c.name,
+                selected: redirectTarget == c.id,
+                onTap: () => onTargetChanged(c.id),
+              ))
+                  .toList(),
+            ),
         ],
       ]),
     );

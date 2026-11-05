@@ -9,6 +9,7 @@ class AppTheme {
   final bool isFree;
   final String emoji;
   final Color? accentColor;
+  final int? pointPrice;
 
   AppTheme({
     required this.id,
@@ -18,7 +19,8 @@ class AppTheme {
     this.price,
     this.isFree = false,
     this.emoji = '🎮',
-    this.accentColor
+    this.accentColor,
+    this.pointPrice
   });
 
   factory AppTheme.fromMap(Map<String, dynamic> m) => AppTheme(

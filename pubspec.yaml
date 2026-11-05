@@ -41,6 +41,8 @@ dependencies:
   supabase_flutter: ^2.14.2
   flutter_tts: ^4.0.2
   shared_preferences: ^2.3.2
+  in_app_review: ^2.0.9
+  url_launcher: ^6.3.0
 
 dev_dependencies:
   flutter_test:
@@ -52,6 +54,24 @@ dev_dependencies:
   # package. See that file for information about deactivating specific lint
   # rules and activating additional ones.
   flutter_lints: ^6.0.0
+  flutter_launcher_icons: ^0.14.4
+  flutter_native_splash: ^2.4.6
+flutter_launcher_icons:
+  android: "launcher_icon"
+  ios: true
+  remove_alpha_ios: true
+  image_path: "lib/assets/icon/icon.png"
+  adaptive_icon_background: "#212B55"
+  adaptive_icon_foreground: "lib/assets/icon/icon_foreground.png"
+
+flutter_native_splash:
+  color: "#212B55"
+  image: "lib/assets/splash/splash_logo.png"
+  android_12:
+    image: "lib/assets/splash/splash_logo_android12.png"
+    icon_background_color: "#212B55"
+  ios: true
+  android: true
 
 # For information on the generic Dart part of this file, see the
 # following page: https://dart.dev/tools/pub/pubspec

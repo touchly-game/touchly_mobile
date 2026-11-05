@@ -1,5 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:supabase_flutter/supabase_flutter.dart';
+import 'package:touchly/core/models/app_theme.dart';
 import 'package:touchly/features/onboarding/presentation/pages/demo_flow.dart';
 import 'package:touchly/features/onboarding/presentation/pages/login_page.dart';
 import 'package:touchly/features/onboarding/presentation/pages/register_page.dart';
@@ -18,6 +20,14 @@ const _textPrimary = Color(0xFFFFFFFF);
 const _textSub     = Color(0xFFB3C8F0);
 // ─────────────────────────────────────────────
 
+/// Noms des thèmes éligibles à la démo, dans l'ordre d'affichage voulu.
+/// Modifie cette liste si tu veux ajouter/retirer des thèmes du carrousel.
+const List<String> _demoThemeNames = [
+  'Sport & Champions',
+  'Science & Nature',
+  'Pokémon',
+];
+
 class OnboardingPage extends StatefulWidget {
   const OnboardingPage({super.key});
 
@@ -26,9 +36,17 @@ class OnboardingPage extends StatefulWidget {
 }
 
 class _OnboardingPageState extends State<OnboardingPage>
-    with SingleTickerProviderStateMixin {
+    with TickerProviderStateMixin {
   late final AnimationController _pulseCtrl;
   late final Animation<double>   _pulseAnim;
+
+  // ── Carrousel de thèmes ────────────────────
+  late final PageController _pageController;
+  List<AppTheme> _themes        = [];
+  bool           _loadingThemes = true;
+  String?        _themesError;
+  double         _currentPage   = 0; // valeur continue (pour l'animation)
+  int            _selectedIndex = 0; // index arrondi = thème sélectionné
 
   @override
   void initState() {
@@ -40,12 +58,83 @@ class _OnboardingPageState extends State<OnboardingPage>
     _pulseAnim = Tween<double>(begin: 0.92, end: 1.0).animate(
       CurvedAnimation(parent: _pulseCtrl, curve: Curves.easeInOut),
     );
+
+    _pageController = PageController(viewportFraction: 0.72)
+      ..addListener(_onPageScroll);
+
+    _loadThemes();
   }
 
   @override
   void dispose() {
     _pulseCtrl.dispose();
+    _pageController.removeListener(_onPageScroll);
+    _pageController.dispose();
     super.dispose();
+  }
+
+  void _onPageScroll() {
+    if (!_pageController.hasClients || !_pageController.position.haveDimensions) return;
+    setState(() => _currentPage = _pageController.page ?? 0);
+  }
+
+  Future<void> _loadThemes() async {
+    setState(() { _loadingThemes = true; _themesError = null; });
+    try {
+      final data = await Supabase.instance.client
+          .from('themes')
+          .select('*')
+          .inFilter('name', _demoThemeNames)
+          .eq('is_active', true) as List;
+
+      final fetched = data
+          .map((e) => AppTheme.fromMap(e as Map<String, dynamic>))
+          .toList();
+
+      // Réordonne selon _demoThemeNames pour un affichage prévisible,
+      // peu importe l'ordre renvoyé par Supabase.
+      fetched.sort((a, b) => _demoThemeNames
+          .indexOf(a.name)
+          .compareTo(_demoThemeNames.indexOf(b.name)));
+
+      if (mounted) {
+        setState(() {
+          _themes = fetched;
+          _loadingThemes = false;
+          if (_themes.isEmpty) {
+            _themesError = 'Aucun thème disponible pour le moment.';
+          }
+        });
+      }
+    } catch (e) {
+      debugPrint('Erreur chargement thèmes carrousel: $e');
+      if (mounted) {
+        setState(() {
+          _loadingThemes = false;
+          _themesError = 'Impossible de charger les thèmes.';
+        });
+      }
+    }
+  }
+
+  void _startDemo() {
+    if (_themes.isEmpty) return;
+    HapticFeedback.mediumImpact();
+    final theme = _themes[_selectedIndex.clamp(0, _themes.length - 1)];
+    Navigator.push(
+      context,
+      MaterialPageRoute(
+        builder: (_) => DemoGamePage(
+          themeId: theme.id,
+          themeName: theme.name,
+          onUnlock: () {
+            Navigator.pushReplacement(context, MaterialPageRoute(
+              builder: (_) => const RegisterPage(),
+            ));
+          },
+        ),
+      ),
+    );
   }
 
   @override
@@ -67,7 +156,6 @@ class _OnboardingPageState extends State<OnboardingPage>
         ),
         child: Stack(
           children: [
-            // ── Lueurs de fond ─────────────────
             Positioned(
               top: -80, left: -80,
               child: _GlowBlob(size: 300,
@@ -87,53 +175,47 @@ class _OnboardingPageState extends State<OnboardingPage>
             SafeArea(
               child: Column(
                 children: [
-                  // ── LOGO — grande zone haut ────────
+                  // ── LOGO ────────────────────────
                   Expanded(
-                    flex: 60,
+                    flex: 52,
                     child: Column(
                       mainAxisAlignment: MainAxisAlignment.center,
                       children: [
-                        const SizedBox(height: 16),
-
-                        // Logo Touchly — très grand
+                        const SizedBox(height: 12),
                         ScaleTransition(
                           scale: _pulseAnim,
                           child: Stack(
                             alignment: Alignment.center,
                             children: [
-                              // Glow jaune derrière
                               Container(
-                                width: size.width * 1.0,
-                                height: size.width * 0.65,
+                                width: size.width * 0.9,
+                                height: size.width * 0.55,
                                 decoration: BoxDecoration(
                                   borderRadius: BorderRadius.circular(40),
                                   boxShadow: [
                                     BoxShadow(
                                       color: _yellow.withOpacity(0.18),
-                                      blurRadius: 80,
-                                      spreadRadius: 20,
+                                      blurRadius: 70,
+                                      spreadRadius: 16,
                                     ),
                                     BoxShadow(
                                       color: const Color(0xFF2979FF)
                                           .withOpacity(0.2),
-                                      blurRadius: 60,
-                                      spreadRadius: 10,
+                                      blurRadius: 50,
+                                      spreadRadius: 8,
                                     ),
                                   ],
                                 ),
                               ),
                               Image.asset(
                                 'lib/assets/images/logo_touchly.png',
-                                width: size.width * 1.0,
+                                width: size.width * 0.9,
                                 fit: BoxFit.contain,
                               ),
                             ],
                           ),
                         ),
-
-                        const SizedBox(height: 18),
-
-                        // Slogan style Hitster
+                        const SizedBox(height: 14),
                         Container(
                           padding: const EdgeInsets.symmetric(
                               horizontal: 20, vertical: 8),
@@ -157,40 +239,45 @@ class _OnboardingPageState extends State<OnboardingPage>
                     ),
                   ),
 
-                  // ── ILLUSTRATION centrale ──────────
+                  // ── CARROUSEL DE THÈMES ─────────
                   Expanded(
-                    flex: 25,
-                    child: Center(
-                      child: _IllustrationCentrale(pulseAnim: _pulseAnim),
+                    flex: 33,
+                    child: Column(
+                      children: [
+                        const Padding(
+                          padding: EdgeInsets.only(bottom: 10),
+                          child: Text(
+                            'CHOISIS TON THÈME POUR LA DÉMO',
+                            style: TextStyle(
+                              color: _textSub,
+                              fontSize: 11,
+                              fontWeight: FontWeight.w800,
+                              letterSpacing: 1.6,
+                            ),
+                          ),
+                        ),
+                        Expanded(child: _buildCarouselBody()),
+                        const SizedBox(height: 10),
+                        if (_themes.isNotEmpty)
+                          _CarouselDots(
+                            count: _themes.length,
+                            currentPage: _currentPage,
+                          ),
+                      ],
                     ),
                   ),
 
-                  // ── BOUTONS bas ────────────────────
+                  // ── BOUTONS bas ─────────────────
                   Padding(
-                    padding:
-                    const EdgeInsets.fromLTRB(24, 0, 24, 32),
+                    padding: const EdgeInsets.fromLTRB(24, 14, 24, 32),
                     child: Column(
                       children: [
-                        // Bouton principal jaune
                         _MainButton(
                           label: 'JOUER MAINTENANT',
-                          onTap: () {
-                            HapticFeedback.mediumImpact();
-                            Navigator.push(
-                              context,
-                              MaterialPageRoute(
-                                  builder: (_) => DemoGamePage(onUnlock: () {
-                                    // Navigue vers ta page d'activation
-                                    Navigator.pushReplacement(context, MaterialPageRoute(
-                                      builder: (_) => const RegisterPage(),
-                                    ));
-                                  })),
-                            );
-                          },
+                          enabled: _themes.isNotEmpty,
+                          onTap: _startDemo,
                         ),
                         const SizedBox(height: 14),
-
-                        // Bouton secondaire
                         _SecondaryButton(
                           label: 'RÈGLES & PARAMÈTRES',
                           onTap: () {
@@ -202,7 +289,6 @@ class _OnboardingPageState extends State<OnboardingPage>
                           },
                         ),
                         const SizedBox(height: 24),
-
                         Row(
                           mainAxisAlignment: MainAxisAlignment.center,
                           children: [
@@ -238,119 +324,94 @@ class _OnboardingPageState extends State<OnboardingPage>
       ),
     );
   }
-}
 
-// ─────────────────────────────────────────────
-//  Illustration centrale — cartes de jeu stylisées
-//  (remplace le haut-parleur Hitster par quelque
-//   chose de cohérent avec Touchly)
-// ─────────────────────────────────────────────
-class _IllustrationCentrale extends StatelessWidget {
-  final Animation<double> pulseAnim;
-  const _IllustrationCentrale({required this.pulseAnim});
+  Widget _buildCarouselBody() {
+    if (_loadingThemes) {
+      return const Center(
+        child: SizedBox(
+          width: 32, height: 32,
+          child: CircularProgressIndicator(strokeWidth: 2.5, color: _yellow),
+        ),
+      );
+    }
 
-  @override
-  Widget build(BuildContext context) {
-    final size = MediaQuery.of(context).size;
-    final cardW = size.width * 0.52;
+    if (_themesError != null || _themes.isEmpty) {
+      return Center(
+        child: Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 32),
+          child: Text(
+            _themesError ?? 'Aucun thème disponible.',
+            textAlign: TextAlign.center,
+            style: const TextStyle(color: _textSub, fontSize: 13),
+          ),
+        ),
+      );
+    }
 
-    return SizedBox(
-      width: size.width,
-      height: size.width * 0.6,
-      child: Stack(
-        alignment: Alignment.center,
-        children: [
-          // Halo central
-          AnimatedBuilder(
-            animation: pulseAnim,
-            builder: (_, __) => Container(
-              width: cardW * pulseAnim.value,
-              height: cardW * pulseAnim.value,
-              decoration: BoxDecoration(
-                shape: BoxShape.circle,
-                gradient: RadialGradient(
-                  colors: [
-                    _yellow.withOpacity(0.12),
-                    Colors.transparent,
-                  ],
-                ),
+    return PageView.builder(
+      controller: _pageController,
+      itemCount: _themes.length,
+      onPageChanged: (i) {
+        HapticFeedback.selectionClick();
+        setState(() => _selectedIndex = i);
+      },
+      itemBuilder: (context, index) {
+        final theme = _themes[index];
+        final delta = (_currentPage - index);
+        final scale = (1 - delta.abs() * 0.22).clamp(0.78, 1.0);
+        final angle = delta.clamp(-1.0, 1.0) * 0.12;
+        final opacity = (1 - delta.abs() * 0.5).clamp(0.4, 1.0);
+
+        return Transform.rotate(
+          angle: angle,
+          child: Transform.scale(
+            scale: scale,
+            child: Opacity(
+              opacity: opacity,
+              child: _ThemeCarouselCard(
+                theme: theme,
+                isSelected: index == _selectedIndex,
               ),
             ),
           ),
-
-          // Carte gauche inclinée
-          Positioned(
-            left: size.width * 0.04,
-            child: Transform.rotate(
-              angle: -0.22,
-              child: _GameCard(
-                emoji: '🎬',
-                label: 'Cinéma',
-                accent: const Color(0xFF6366F1),
-                width: cardW * 0.72,
-              ),
-            ),
-          ),
-
-          // Carte droite inclinée
-          Positioned(
-            right: size.width * 0.04,
-            child: Transform.rotate(
-              angle: 0.22,
-              child: _GameCard(
-                emoji: '⚽',
-                label: 'Sport',
-                accent: const Color(0xFF10B981),
-                width: cardW * 0.72,
-              ),
-            ),
-          ),
-
-          // Carte centrale — au premier plan
-          _GameCard(
-            emoji: '🌍',
-            label: 'Culture G',
-            accent: _yellow,
-            width: cardW,
-            elevated: true,
-          ),
-        ],
-      ),
+        );
+      },
     );
   }
 }
 
-class _GameCard extends StatelessWidget {
-  final String emoji;
-  final String label;
-  final Color accent;
-  final double width;
-  final bool elevated;
+// ─────────────────────────────────────────────
+//  Carte de thème du carrousel
+// ─────────────────────────────────────────────
+class _ThemeCarouselCard extends StatelessWidget {
+  final AppTheme theme;
+  final bool isSelected;
+  const _ThemeCarouselCard({required this.theme, required this.isSelected});
 
-  const _GameCard({
-    required this.emoji,
-    required this.label,
-    required this.accent,
-    required this.width,
-    this.elevated = false,
-  });
+  static const List<Color> _accents = [
+    Color(0xFF6366F1), Color(0xFF10B981), Color(0xFFEC4899),
+    Color(0xFFF97316), Color(0xFF06B6D4),
+  ];
+
+  Color get _accent => _accents[theme.name.hashCode.abs() % _accents.length];
 
   @override
   Widget build(BuildContext context) {
-    return Container(
-      width: width,
-      padding: EdgeInsets.all(width * 0.12),
+    return AnimatedContainer(
+      duration: const Duration(milliseconds: 200),
+      margin: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+      padding: const EdgeInsets.all(16),
       decoration: BoxDecoration(
         color: const Color(0xFF0D3A8E),
-        borderRadius: BorderRadius.circular(20),
+        borderRadius: BorderRadius.circular(22),
         border: Border.all(
-          color: accent.withOpacity(elevated ? 0.6 : 0.25),
-          width: elevated ? 2 : 1,
+          color: isSelected ? _yellow.withOpacity(0.7) : _accent.withOpacity(0.25),
+          width: isSelected ? 2 : 1,
         ),
         boxShadow: [
           BoxShadow(
-            color: accent.withOpacity(elevated ? 0.3 : 0.1),
-            blurRadius: elevated ? 30 : 12,
+            color: isSelected ? _yellow.withOpacity(0.3) : _accent.withOpacity(0.12),
+            blurRadius: isSelected ? 30 : 14,
             offset: const Offset(0, 8),
           ),
           BoxShadow(
@@ -361,29 +422,91 @@ class _GameCard extends StatelessWidget {
         ],
       ),
       child: Column(
-        mainAxisSize: MainAxisSize.min,
+        mainAxisAlignment: MainAxisAlignment.center,
         children: [
-          Text(emoji, style: TextStyle(fontSize: width * 0.22)),
-          SizedBox(height: width * 0.06),
+          if (theme.imageUrl != null)
+            ClipRRect(
+              borderRadius: BorderRadius.circular(14),
+              child: Image.network(
+                theme.imageUrl!,
+                width: 54, height: 54, fit: BoxFit.cover,
+                errorBuilder: (_, __, ___) =>
+                    Text(theme.emoji, style: const TextStyle(fontSize: 40)),
+              ),
+            )
+          else
+            Text(theme.emoji, style: const TextStyle(fontSize: 40)),
+          const SizedBox(height: 10),
           Text(
-            label,
-            style: TextStyle(
+            theme.name,
+            textAlign: TextAlign.center,
+            maxLines: 2,
+            overflow: TextOverflow.ellipsis,
+            style: const TextStyle(
               color: _textPrimary,
-              fontSize: width * 0.11,
+              fontSize: 15,
               fontWeight: FontWeight.w800,
+              height: 1.2,
             ),
           ),
-          SizedBox(height: width * 0.04),
+          const SizedBox(height: 8),
           Container(
-            width: width * 0.4,
-            height: 2,
+            width: 32, height: 3,
             decoration: BoxDecoration(
-              color: accent,
-              borderRadius: BorderRadius.circular(1),
+              color: isSelected ? _yellow : _accent,
+              borderRadius: BorderRadius.circular(2),
             ),
           ),
+          if (isSelected) ...[
+            const SizedBox(height: 10),
+            Container(
+              padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+              decoration: BoxDecoration(
+                color: _yellow.withOpacity(0.15),
+                borderRadius: BorderRadius.circular(8),
+                border: Border.all(color: _yellow.withOpacity(0.35), width: 1),
+              ),
+              child: const Text(
+                'SÉLECTIONNÉ',
+                style: TextStyle(
+                  color: _yellow, fontSize: 9,
+                  fontWeight: FontWeight.w900, letterSpacing: 0.8,
+                ),
+              ),
+            ),
+          ],
         ],
       ),
+    );
+  }
+}
+
+// ─────────────────────────────────────────────
+//  Indicateurs de pagination (dots)
+// ─────────────────────────────────────────────
+class _CarouselDots extends StatelessWidget {
+  final int count;
+  final double currentPage;
+  const _CarouselDots({required this.count, required this.currentPage});
+
+  @override
+  Widget build(BuildContext context) {
+    return Row(
+      mainAxisAlignment: MainAxisAlignment.center,
+      children: List.generate(count, (i) {
+        final distance = (currentPage - i).abs().clamp(0.0, 1.0);
+        final width = 8 + (1 - distance) * 14;
+        return AnimatedContainer(
+          duration: const Duration(milliseconds: 150),
+          margin: const EdgeInsets.symmetric(horizontal: 3),
+          width: width,
+          height: 8,
+          decoration: BoxDecoration(
+            color: Color.lerp(_textSub.withOpacity(0.3), _yellow, 1 - distance),
+            borderRadius: BorderRadius.circular(4),
+          ),
+        );
+      }),
     );
   }
 }
@@ -393,8 +516,9 @@ class _GameCard extends StatelessWidget {
 // ─────────────────────────────────────────────
 class _MainButton extends StatefulWidget {
   final String label;
+  final bool enabled;
   final VoidCallback onTap;
-  const _MainButton({required this.label, required this.onTap});
+  const _MainButton({required this.label, required this.onTap, this.enabled = true});
 
   @override
   State<_MainButton> createState() => _MainButtonState();
@@ -424,41 +548,45 @@ class _MainButtonState extends State<_MainButton>
 
   @override
   Widget build(BuildContext context) {
+    final enabled = widget.enabled;
     return ScaleTransition(
       scale: _scale,
       child: GestureDetector(
-        onTapDown: (_) => _ctrl.forward(),
-        onTapUp: (_) {
-          _ctrl.reverse();
-          widget.onTap();
-        },
-        onTapCancel: () => _ctrl.reverse(),
-        child: Container(
-          width: double.infinity,
-          height: 62,
-          decoration: BoxDecoration(
-            gradient: const LinearGradient(
-              colors: [_yellow, Color(0xFFFFB300)],
-              begin: Alignment.topLeft,
-              end: Alignment.bottomRight,
-            ),
-            borderRadius: BorderRadius.circular(18),
-            boxShadow: [
-              BoxShadow(
-                color: _yellow.withOpacity(0.5),
-                blurRadius: 32,
-                offset: const Offset(0, 8),
+        onTapDown: enabled ? (_) => _ctrl.forward() : null,
+        onTapUp: enabled ? (_) { _ctrl.reverse(); widget.onTap(); } : null,
+        onTapCancel: enabled ? () => _ctrl.reverse() : null,
+        child: AnimatedOpacity(
+          duration: const Duration(milliseconds: 200),
+          opacity: enabled ? 1.0 : 0.45,
+          child: Container(
+            width: double.infinity,
+            height: 62,
+            decoration: BoxDecoration(
+              gradient: const LinearGradient(
+                colors: [_yellow, Color(0xFFFFB300)],
+                begin: Alignment.topLeft,
+                end: Alignment.bottomRight,
               ),
-            ],
-          ),
-          child: Center(
-            child: Text(
-              widget.label,
-              style: const TextStyle(
-                color: _navy,
-                fontSize: 16,
-                fontWeight: FontWeight.w900,
-                letterSpacing: 1.5,
+              borderRadius: BorderRadius.circular(18),
+              boxShadow: enabled
+                  ? [
+                BoxShadow(
+                  color: _yellow.withOpacity(0.5),
+                  blurRadius: 32,
+                  offset: const Offset(0, 8),
+                ),
+              ]
+                  : null,
+            ),
+            child: Center(
+              child: Text(
+                widget.label,
+                style: const TextStyle(
+                  color: _navy,
+                  fontSize: 16,
+                  fontWeight: FontWeight.w900,
+                  letterSpacing: 1.5,
+                ),
               ),
             ),
           ),

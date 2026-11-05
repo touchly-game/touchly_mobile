@@ -2,6 +2,8 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 import 'package:touchly/core/models/app_theme.dart';
+import 'package:touchly/features/onboarding/presentation/pages/points_service.dart';
+
 
 // ─────────────────────────────────────────────
 //  Design tokens Touchly
@@ -15,6 +17,7 @@ const _textPrimary   = Color(0xFFFFFFFF);
 const _textSub       = Color(0xFFB3C8F0);
 const _successColor  = Color(0xFF3DD68C);
 const _errorColor    = Color(0xFFFF5A7D);
+const _purple        = Color(0xFF7C3AED);
 // ─────────────────────────────────────────────
 
 // ─────────────────────────────────────────────
@@ -57,7 +60,10 @@ class _ThemeStorePageState extends State<ThemeStorePage>
   List<AppTheme> _themes   = [];
   List<String>   _ownedIds = [];
   bool           _loading  = true;
-  String?        _activating; // id du thème gratuit en cours d'activation
+  String?        _activating;      // id du thème gratuit en cours d'activation
+  String?        _redeemingPoints; // id du thème en cours de déblocage par points
+
+  UserPoints _points = UserPoints.zero; // ← NOUVEAU
 
   String _filter = 'all';
   late final TabController _tabCtrl;
@@ -104,6 +110,11 @@ class _ThemeStorePageState extends State<ThemeStorePage>
         else
           Future.value(<dynamic>[]),
       ]);
+
+      // Chargé séparément : ne doit jamais bloquer l'affichage des
+      // thèmes si la lecture du solde échoue.
+      final points = await PointsService.fetchCurrentUserPoints();
+
       if (mounted) {
         setState(() {
           _themes   = (results[0] as List)
@@ -112,6 +123,7 @@ class _ThemeStorePageState extends State<ThemeStorePage>
           _ownedIds = (results[1] as List)
               .map((e) => e['theme_id'] as String)
               .toList();
+          _points = points; // ← NOUVEAU
         });
       }
     } catch (e) {
@@ -145,6 +157,35 @@ class _ThemeStorePageState extends State<ThemeStorePage>
       if (mounted) _showSnack('Une erreur est survenue.', error: true);
     } finally {
       if (mounted) setState(() => _activating = null);
+    }
+  }
+
+  // ── Déblocage par points ─────────────────────  ← NOUVEAU
+  Future<void> _redeemWithPoints(AppTheme theme) async {
+    if (theme.pointPrice == null) return;
+    setState(() => _redeemingPoints = theme.id);
+    HapticFeedback.mediumImpact();
+    try {
+      final success = await PointsService.redeemThemeWithPoints(theme.id);
+      if (!mounted) return;
+
+      if (success) {
+        setState(() {
+          _ownedIds = [..._ownedIds, theme.id];
+          _points = UserPoints(
+            balance: _points.balance - theme.pointPrice!,
+            lifetime: _points.lifetime, // le lifetime ne bouge jamais à la dépense
+          );
+        });
+        widget.onPurchase?.call();
+        _showSnack('${theme.emoji}  "${theme.name}" débloqué avec tes points !');
+      } else {
+        _showSnack('Solde de points insuffisant.', error: true);
+      }
+    } catch (_) {
+      if (mounted) _showSnack('Une erreur est survenue.', error: true);
+    } finally {
+      if (mounted) setState(() => _redeemingPoints = null);
     }
   }
 
@@ -184,7 +225,6 @@ class _ThemeStorePageState extends State<ThemeStorePage>
       MaterialPageRoute(
         builder: (_) => CartPage(
           onPurchaseComplete: () {
-            // Recharge les thèmes possédés après achat
             _loadData();
             widget.onPurchase?.call();
           },
@@ -228,6 +268,7 @@ class _ThemeStorePageState extends State<ThemeStorePage>
                   // ── Header ───────────────────────────
                   _StoreHeader(
                     cartCount: _cart.count,
+                    pointsBalance: _points.balance, // ← NOUVEAU
                     onBack: () => Navigator.pop(context),
                     onCartTap: _openCart,
                   ),
@@ -272,11 +313,16 @@ class _ThemeStorePageState extends State<ThemeStorePage>
                             isOwned: owned,
                             inCart: inCart,
                             isActivating: _activating == theme.id,
+                            isRedeemingPoints: _redeemingPoints == theme.id, // ← NOUVEAU
+                            pointsBalance: _points.balance,                  // ← NOUVEAU
                             onAction: owned
                                 ? null
                                 : theme.isFree
                                 ? () => _activateFree(theme)
                                 : () => _addToCart(theme),
+                            onRedeemWithPoints: (owned || theme.pointPrice == null) // ← NOUVEAU
+                                ? null
+                                : () => _redeemWithPoints(theme),
                           );
                         },
                       ),
@@ -308,11 +354,13 @@ class _ThemeStorePageState extends State<ThemeStorePage>
 // ─────────────────────────────────────────────
 class _StoreHeader extends StatelessWidget {
   final int cartCount;
+  final int pointsBalance; // ← NOUVEAU
   final VoidCallback onBack;
   final VoidCallback onCartTap;
 
   const _StoreHeader({
     required this.cartCount,
+    required this.pointsBalance,
     required this.onBack,
     required this.onCartTap,
   });
@@ -349,6 +397,28 @@ class _StoreHeader extends StatelessWidget {
               ],
             ),
           ),
+
+          // ── Solde de points — NOUVEAU ──
+          Container(
+            margin: const EdgeInsets.only(right: 8),
+            padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+            decoration: BoxDecoration(
+              color: _yellow.withOpacity(0.12),
+              borderRadius: BorderRadius.circular(12),
+              border: Border.all(color: _yellow.withOpacity(0.3), width: 1),
+            ),
+            child: Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                const Icon(Icons.bolt_rounded, color: _yellow, size: 14),
+                const SizedBox(width: 4),
+                Text('$pointsBalance',
+                    style: const TextStyle(color: _yellow, fontSize: 13,
+                        fontWeight: FontWeight.w900)),
+              ],
+            ),
+          ),
+
           // Bouton panier avec badge
           GestureDetector(
             onTap: onCartTap,
@@ -493,18 +563,28 @@ class _ThemeCard extends StatelessWidget {
   final bool isOwned;
   final bool inCart;
   final bool isActivating;
+  final bool isRedeemingPoints;   // ← NOUVEAU
+  final int pointsBalance;        // ← NOUVEAU
   final VoidCallback? onAction;
+  final VoidCallback? onRedeemWithPoints; // ← NOUVEAU
 
   const _ThemeCard({
     required this.theme,
     required this.isOwned,
     required this.inCart,
     required this.isActivating,
+    required this.isRedeemingPoints,
+    required this.pointsBalance,
     required this.onAction,
+    required this.onRedeemWithPoints,
   });
 
   @override
   Widget build(BuildContext context) {
+    final canRedeemWithPoints = onRedeemWithPoints != null;
+    final hasEnoughPoints =
+        theme.pointPrice != null && pointsBalance >= theme.pointPrice!;
+
     return Container(
       decoration: BoxDecoration(
         color: Colors.white.withOpacity(0.06),
@@ -519,6 +599,7 @@ class _ThemeCard extends StatelessWidget {
         ),
       ),
       child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
         children: [
           // Visuel gauche
           ClipRRect(
@@ -568,7 +649,7 @@ class _ThemeCard extends StatelessWidget {
 
                   const SizedBox(height: 12),
 
-                  // Bouton action
+                  // Bouton(s) action
                   if (isOwned)
                     const Row(
                       children: [
@@ -587,30 +668,106 @@ class _ThemeCard extends StatelessWidget {
                       color: _successColor,
                       onTap: onAction,
                     )
-                  else if (inCart)
-                      const Row(
-                        children: [
-                          Icon(Icons.shopping_cart_rounded,
-                              color: _yellow, size: 15),
-                          SizedBox(width: 6),
-                          Text('Dans le panier',
-                              style: TextStyle(color: _yellow,
-                                  fontSize: 12, fontWeight: FontWeight.w700)),
-                        ],
-                      )
-                    else
-                      _ActionButton(
-                        label: '🛒  Ajouter au panier',
-                        isLoading: false,
-                        color: _yellow,
-                        textColor: _navy,
-                        onTap: onAction,
-                      ),
+                  else ...[
+                      if (inCart)
+                        const Padding(
+                          padding: EdgeInsets.only(bottom: 8),
+                          child: Row(
+                            children: [
+                              Icon(Icons.shopping_cart_rounded,
+                                  color: _yellow, size: 15),
+                              SizedBox(width: 6),
+                              Text('Dans le panier',
+                                  style: TextStyle(color: _yellow,
+                                      fontSize: 12, fontWeight: FontWeight.w700)),
+                            ],
+                          ),
+                        )
+                      else
+                        Padding(
+                          padding: const EdgeInsets.only(bottom: 8),
+                          child: _ActionButton(
+                            label: '🛒  Ajouter au panier',
+                            isLoading: false,
+                            color: _yellow,
+                            textColor: _navy,
+                            onTap: onAction,
+                          ),
+                        ),
+
+                      // ── Option de déblocage par points — NOUVEAU ──
+                      if (canRedeemWithPoints)
+                        _PointsRedeemButton(
+                          pointPrice: theme.pointPrice!,
+                          enabled: hasEnoughPoints,
+                          isLoading: isRedeemingPoints,
+                          onTap: hasEnoughPoints ? onRedeemWithPoints : null,
+                        ),
+                    ],
                 ],
               ),
             ),
           ),
         ],
+      ),
+    );
+  }
+}
+
+// ── Bouton "Débloquer avec X points" — NOUVEAU ──
+class _PointsRedeemButton extends StatelessWidget {
+  final int pointPrice;
+  final bool enabled;
+  final bool isLoading;
+  final VoidCallback? onTap;
+
+  const _PointsRedeemButton({
+    required this.pointPrice,
+    required this.enabled,
+    required this.isLoading,
+    required this.onTap,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return GestureDetector(
+      onTap: onTap,
+      child: Container(
+        width: double.infinity,
+        padding: const EdgeInsets.symmetric(vertical: 9),
+        decoration: BoxDecoration(
+          color: enabled ? _purple.withOpacity(0.14) : Colors.white.withOpacity(0.04),
+          borderRadius: BorderRadius.circular(12),
+          border: Border.all(
+            color: enabled ? _purple.withOpacity(0.4) : Colors.white.withOpacity(0.08),
+            width: 1,
+          ),
+        ),
+        child: Center(
+          child: isLoading
+              ? const SizedBox(
+            width: 14, height: 14,
+            child: CircularProgressIndicator(strokeWidth: 2, color: _purple),
+          )
+              : Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Icon(Icons.bolt_rounded,
+                  color: enabled ? _purple : _textSub.withOpacity(0.4), size: 14),
+              const SizedBox(width: 5),
+              Text(
+                enabled
+                    ? 'Débloquer avec $pointPrice pts'
+                    : 'Il manque des points ($pointPrice pts)',
+                style: TextStyle(
+                  color: enabled ? _purple : _textSub.withOpacity(0.4),
+                  fontSize: 11.5,
+                  fontWeight: FontWeight.w800,
+                ),
+              ),
+            ],
+          ),
+        ),
       ),
     );
   }
